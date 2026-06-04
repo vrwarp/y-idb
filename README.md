@@ -2,7 +2,7 @@
 
 > IndexedDB database provider for Yjs (Fork of [`y-indexeddb`](https://github.com/yjs/y-indexeddb)).
 >
-> Official documentation: [docs.yjs.dev](https://docs.yjs.dev/ecosystem/database-provider/y-indexeddb)
+> Official documentation: [vrwarp.github.io/y-idb](https://vrwarp.github.io/y-idb/)
 
 Use the IndexedDB database adapter to store your shared data persistently in
 the browser. The next time you join the session, your changes will still be
@@ -13,7 +13,7 @@ there.
 
 ## Getting Started
 
-You find the complete documentation published online: [API documentation](https://docs.yjs.dev/ecosystem/database-provider/y-indexeddb).
+You find the complete documentation published online: [API documentation](https://vrwarp.github.io/y-idb/).
 
 ```sh
 npm i --save y-idb

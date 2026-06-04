@@ -16,7 +16,7 @@
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "test": "npm run lint && node --import fake-indexeddb/auto tests/index.js",
+    "test": "npm run lint && node tests/node.js",
     "dist": "rollup -c",
     "build": "npm run clean && tsc && rollup -c",
     "prepare": "npm run build",
