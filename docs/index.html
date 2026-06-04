@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>y-idb | Persistent IndexedDB Provider for Yjs</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(17, 24, 39, 0.7);
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --primary: #8b5cf6;
+      --primary-glow: rgba(139, 92, 246, 0.15);
+      --accent: #ec4899;
+      --success: #10b981;
+      --danger: #ef4444;
+      --font-sans: 'Inter', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.06) 0%, transparent 40%);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      overflow-x: hidden;
+      padding-bottom: 80px;
+    }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(11, 15, 25, 0.8);
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      color: white;
+      box-shadow: 0 0 12px var(--primary-glow);
+    }
+
+    .logo-text {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(to right, #ffffff, var(--text-muted));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .github-link {
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      padding: 8px 16px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.03);
+      transition: all 0.2s;
+    }
+
+    .github-link:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--text-muted);
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 40px auto;
+      padding: 0 24px;
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 40px;
+    }
+
+    @media (max-width: 1024px) {
+      .container {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .docs-section {
+      display: flex;
+      flex-col: column;
+      flex-direction: column;
+      gap: 32px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 30px rgba(0, 0, 0, 0.4);
+    }
+
+    h1 {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, #ffffff 0%, #a78bfa 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    h2 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      border-left: 4px solid var(--primary);
+      padding-left: 12px;
+    }
+
+    p {
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      font-size: 15px;
+    }
+
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 3px 6px;
+      border-radius: 4px;
+      color: #e9d5ff;
+    }
+
+    pre {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      overflow-x: auto;
+      margin: 16px 0;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      color: #c9d1d9;
+    }
+
+    .api-entry {
+      border-bottom: 1px solid var(--border);
+      padding: 20px 0;
+    }
+
+    .api-entry:last-child {
+      border-bottom: none;
+    }
+
+    .api-sig {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: #f3f4f6;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    /* Simulation Styles */
+    .sim-panel {
+      position: sticky;
+      top: 100px;
+      align-self: start;
+    }
+
+    .sim-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+
+    .badge {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 8px;
+      border-radius: 12px;
+      text-transform: uppercase;
+    }
+
+    .badge-live {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .sim-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .form-group label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
+    .input-row {
+      display: flex;
+      gap: 12px;
+    }
+
+    input[type="number"] {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: white;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      flex-grow: 1;
+    }
+
+    .btn {
+      background: var(--primary);
+      border: none;
+      color: white;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    .btn:hover {
+      background: #7c3aed;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      box-shadow: none;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+    }
+
+    .checkbox {
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.2);
+      transition: all 0.2s;
+    }
+
+    .checkbox-active {
+      background: var(--danger);
+      border-color: var(--danger);
+    }
+
+    .checkbox-active::after {
+      content: '✓';
+      color: white;
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    /* Simulation Pipeline Visualizer */
+    .pipeline {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      background: rgba(0, 0, 0, 0.2);
+      margin-bottom: 24px;
+    }
+
+    .pipeline-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .stage-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .stage-box {
+      min-height: 50px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px;
+      align-items: center;
+    }
+
+    .stage-box-active {
+      border-color: var(--primary);
+      background: rgba(139, 92, 246, 0.03);
+    }
+
+    .stage-box-error {
+      border-color: var(--danger);
+      background: rgba(239, 68, 68, 0.03);
+    }
+
+    .update-chip {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(236, 72, 153, 0.15));
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      animation: pop-in 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    .status-text {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .status-idle { color: var(--text-muted); }
+    .status-writing { color: var(--primary); }
+    .status-error { color: var(--danger); }
+
+    .sim-logs {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: #05070c;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      height: 150px;
+      overflow-y: auto;
+      color: #10b981;
+    }
+
+    .log-line {
+      margin-bottom: 4px;
+      border-left: 2px solid transparent;
+      padding-left: 6px;
+    }
+
+    .log-info { border-color: var(--primary); color: #c084fc; }
+    .log-success { border-color: var(--success); color: #34d399; }
+    .log-error { border-color: var(--danger); color: #f87171; }
+
+    @keyframes pop-in {
+      from { transform: scale(0.8); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-icon">y</div>
+      <div class="logo-text">y-idb</div>
+    </div>
+    <a href="https://github.com/vrwarp/y-idb" class="github-link">GitHub Repo</a>
+  </header>
+
+  <div class="container">
+    
+    <!-- LEFT: DOCUMENTATION -->
+    <div class="docs-section">
+      
+      <div class="card">
+        <h1>y-idb</h1>
+        <p>A persistent, high-performance IndexedDB database provider for Yjs. This library is a robust fork of <code>y-indexeddb</code>, featuring bounded write concurrency, microtask transaction batching, and error propagation.</p>
+        
+        <h2>Key Benefits</h2>
+        <ul style="margin-left: 20px; color: var(--text-muted); font-size: 15px; display: flex; flex-direction: column; gap: 8px;">
+          <li><strong>Bounded Concurrency:</strong> Restricts writes to at most 1 in-flight transaction, completely eliminating IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers).</li>
+          <li><strong>Microtask Batching:</strong> Automatically bundles synchronous or high-frequency updates into a single write transaction with sub-millisecond latency.</li>
+          <li><strong>Durability Safeguards:</strong> Best-effort flush listeners queue and persist memory updates on page hide, document destruction, and tab close.</li>
+          <li><strong>Error Handling:</strong> Propagates database transaction errors (such as <code>QuotaExceededError</code>) through an Observable event emitter, preventing silent data drops.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Getting Started</h2>
+        <p>Install the library via npm:</p>
+        <pre><code>npm install --save y-idb</code></pre>
+        
+        <p>Initialize the persistence provider with your Yjs document:</p>
+        <pre><code>import * as Y from 'yjs'
+import { IndexeddbPersistence } from 'y-idb'
+
+const ydoc = new Y.Doc()
+const provider = new IndexeddbPersistence('room-name', ydoc)
+
+provider.on('synced', () => {
+  console.log('Database synced! All local updates loaded.')
+})</code></pre>
+      </div>
+
+      <div class="card">
+        <h2>API Reference</h2>
+        
+        <div class="api-entry">
+          <div class="api-sig">new IndexeddbPersistence(docName: string, ydoc: Y.Doc, options?: { writeDebounceMs?: number })</div>
+          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask).</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.on('synced', (idb: IndexeddbPersistence) => void)</div>
+          <p>Emitted when database connection is synced and initial history has finished loading.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.on('error', (err: Error) => void)</div>
+          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with a 500ms backoff.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.destroy(): Promise&lt;void&gt;</div>
+          <p>Flushes all pending buffer updates to IndexedDB and closes the database connection.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.clearData(): Promise&lt;void&gt;</div>
+          <p>Deletes the entire IndexedDB database, removing all updates and meta properties.</p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT: INTERACTIVE SIMULATOR -->
+    <div class="sim-panel card">
+      <div class="sim-header">
+        <h2>Live Simulator</h2>
+        <span class="badge badge-live">Interactive</span>
+      </div>
+      
+      <p>Simulate document edits under different load configurations to see how the single-in-flight batched writer behaves visually.</p>
+
+      <div class="sim-controls">
+        <div class="form-group">
+          <label for="debounce">writeDebounceMs (Aggregation Delay)</label>
+          <div class="input-row">
+            <input type="number" id="debounce" value="0" min="0" max="2000" step="50">
+            <button class="btn btn-secondary" onclick="setDebounce(0)">Reset (0)</button>
+          </div>
+        </div>
+
+        <div class="toggle-row" onclick="toggleErrorSim()">
+          <div class="checkbox" id="err-check"></div>
+          <label style="cursor: pointer; font-size: 14px; font-weight: 500;">Simulate Storage Full (QuotaExceededError)</label>
+        </div>
+
+        <div style="display: flex; gap: 10px;">
+          <button class="btn" style="flex: 1;" onclick="triggerUpdate()">Doc Update</button>
+          <button class="btn btn-secondary" onclick="triggerBurst(10)">Burst (10 Updates)</button>
+        </div>
+      </div>
+
+      <!-- Pipeline Visualization -->
+      <div class="pipeline">
+        <div class="pipeline-stage">
+          <div class="stage-title">
+            <span>Pending Buffer</span>
+            <span id="buffer-count">0 Updates</span>
+          </div>
+          <div class="stage-box" id="buffer-box"></div>
+        </div>
+
+        <div class="pipeline-stage">
+          <div class="stage-title">
+            <span>Write Transaction Pipeline</span>
+            <span id="pipeline-status" class="status-idle">Idle</span>
+          </div>
+          <div class="stage-box" id="pipeline-box"></div>
+        </div>
+
+        <div class="pipeline-stage">
+          <div class="stage-title">
+            <span>IndexedDB Stored Rows</span>
+            <span id="db-count">0 Rows</span>
+          </div>
+          <div class="stage-box" id="db-box"></div>
+        </div>
+      </div>
+
+      <!-- Logs -->
+      <div class="sim-logs" id="logs">
+        <div class="log-line log-success">> y-idb database provider simulated initialized.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Mock State
+    let debounceMs = 0;
+    let simulateError = false;
+    let pendingUpdates = [];
+    let writing = false;
+    let flushScheduled = false;
+    let dbRows = 0;
+    let updateIdCounter = 1;
+
+    const debounceInput = document.getElementById('debounce');
+    const errCheck = document.getElementById('err-check');
+    const bufferBox = document.getElementById('buffer-box');
+    const bufferCount = document.getElementById('buffer-count');
+    const pipelineBox = document.getElementById('pipeline-box');
+    const pipelineStatus = document.getElementById('pipeline-status');
+    const dbBox = document.getElementById('db-box');
+    const dbCount = document.getElementById('db-count');
+    const logs = document.getElementById('logs');
+
+    debounceInput.addEventListener('change', (e) => {
+      debounceMs = parseInt(e.target.value) || 0;
+      log(`Configured writeDebounceMs to ${debounceMs}ms`, 'info');
+    });
+
+    function setDebounce(val) {
+      debounceInput.value = val;
+      debounceMs = val;
+      log(`Reset writeDebounceMs to ${val}ms (microtask coalescing)`, 'info');
+    }
+
+    function toggleErrorSim() {
+      simulateError = !simulateError;
+      errCheck.classList.toggle('checkbox-active', simulateError);
+      log(`Simulate QuotaExceededError: ${simulateError ? 'ENABLED' : 'DISABLED'}`, simulateError ? 'error' : 'info');
+    }
+
+    function triggerUpdate() {
+      const id = updateIdCounter++;
+      pendingUpdates.push(`up_${id}`);
+      log(`Doc update 'up_${id}' generated`, 'info');
+      updateUI();
+      scheduleFlush();
+    }
+
+    function triggerBurst(count) {
+      log(`Generating burst of ${count} document updates...`, 'info');
+      for(let i=0; i<count; i++) {
+        const id = updateIdCounter++;
+        pendingUpdates.push(`up_${id}`);
+      }
+      updateUI();
+      scheduleFlush();
+    }
+
+    function scheduleFlush() {
+      if (flushScheduled || writing || pendingUpdates.length === 0) return;
+      flushScheduled = true;
+      log(`Scheduling flush...`, 'info');
+      
+      if (debounceMs > 0) {
+        setTimeout(() => {
+          flushScheduled = false;
+          flush();
+        }, debounceMs);
+      } else {
+        queueMicrotask(() => {
+          flushScheduled = false;
+          flush();
+        });
+      }
+    }
+
+    function flush() {
+      if (writing || pendingUpdates.length === 0) return;
+      writing = true;
+      pipelineStatus.className = 'status-writing';
+      pipelineStatus.textContent = 'Active Transaction';
+      pipelineBox.classList.add('stage-box-active');
+
+      const batch = [...pendingUpdates];
+      pendingUpdates = [];
+      updateUI();
+
+      // Show in-flight chips
+      pipelineBox.innerHTML = '';
+      batch.forEach(item => {
+        const chip = document.createElement('div');
+        chip.className = 'update-chip';
+        chip.textContent = item;
+        pipelineBox.appendChild(chip);
+      });
+
+      log(`Opened readwrite transaction on 'updates' store for batch of ${batch.length} updates`, 'info');
+
+      // Simulate transaction complete/error after a mock delay (e.g. 500ms)
+      setTimeout(() => {
+        if (simulateError) {
+          // Re-buffer batch on error
+          pendingUpdates = [...batch, ...pendingUpdates];
+          writing = false;
+          pipelineBox.innerHTML = '';
+          pipelineBox.classList.remove('stage-box-active');
+          pipelineBox.classList.add('stage-box-error');
+          pipelineStatus.className = 'status-error';
+          pipelineStatus.textContent = 'Transaction Aborted';
+
+          log(`Transaction Error (QuotaExceededError): Aborted transaction. Emitting 'error' event.`, 'error');
+          log(`Failed batch prepended back to memory buffer. Applying 500ms retry backoff.`, 'error');
+          
+          updateUI();
+
+          setTimeout(() => {
+            pipelineBox.classList.remove('stage-box-error');
+            pipelineStatus.className = 'status-idle';
+            pipelineStatus.textContent = 'Idle';
+            scheduleFlush();
+          }, 500);
+        } else {
+          dbRows += batch.length;
+          writing = false;
+          pipelineBox.innerHTML = '';
+          pipelineBox.classList.remove('stage-box-active');
+          pipelineStatus.className = 'status-idle';
+          pipelineStatus.textContent = 'Idle';
+
+          log(`Transaction successfully committed. Saved ${batch.length} rows.`, 'success');
+          
+          // Render saved rows in DB
+          dbBox.innerHTML = '';
+          const maxRows = Math.min(dbRows, 15);
+          for(let i=0; i<maxRows; i++) {
+            const chip = document.createElement('div');
+            chip.className = 'update-chip';
+            chip.textContent = `row_${i+1}`;
+            dbBox.appendChild(chip);
+          }
+          if (dbRows > 15) {
+            const el = document.createElement('div');
+            el.style.fontSize = '12px';
+            el.style.color = 'var(--text-muted)';
+            el.textContent = `+ ${dbRows - 15} more...`;
+            dbBox.appendChild(el);
+          }
+
+          updateUI();
+
+          if (pendingUpdates.length > 0) {
+            scheduleFlush();
+          }
+        }
+      }, 600);
+    }
+
+    function updateUI() {
+      // Buffer Box
+      bufferBox.innerHTML = '';
+      pendingUpdates.forEach(item => {
+        const chip = document.createElement('div');
+        chip.className = 'update-chip';
+        chip.textContent = item;
+        bufferBox.appendChild(chip);
+      });
+      bufferCount.textContent = `${pendingUpdates.length} Updates`;
+      dbCount.textContent = `${dbRows} Rows`;
+    }
+
+    function log(message, type = 'info') {
+      const time = new Date().toLocaleTimeString();
+      const div = document.createElement('div');
+      div.className = `log-line log-${type}`;
+      div.textContent = `[${time}] ${message}`;
+      logs.appendChild(div);
+      logs.scrollTop = logs.scrollHeight;
+    }
+  </script>
+</body>
+</html>
