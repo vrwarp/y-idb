@@ -54,6 +54,8 @@ export const testIdbUpdateAndMerge = async tc => {
   await fetchUpdates(persistence2)
   t.assert(arr2.length === PREFERRED_TRIM_SIZE + 1)
   t.assert(persistence1._dbsize === 1) // wait for dbsize === 0. db should be concatenated
+  persistence1.destroy()
+  persistence2.destroy()
 }
 
 /**
@@ -88,6 +90,8 @@ export const testIdbConcurrentMerge = async tc => {
   t.assert(persistence1._dbsize < 10)
   t.assert(persistence2._dbsize < 10)
   t.compareArrays(arr1.toArray(), arr2.toArray())
+  persistence1.destroy()
+  persistence2.destroy()
 }
 
 /**
@@ -107,6 +111,7 @@ export const testMetaStorage = async tc => {
   t.assert(resB === 'meta!')
   const resC = await persistence.get('obj')
   t.compareObjects(resC, { a: 4 })
+  persistence.destroy()
 }
 
 /**
