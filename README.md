@@ -30,17 +30,31 @@ provider.on('synced', () => {
 ## API
 
 <dl>
-  <b><code>provider = new IndexeddbPersistence(docName: string, ydoc: Y.Doc)</code></b>
+  <b><code>provider = new IndexeddbPersistence(<br/>
+    docName: string,<br/>
+    ydoc: Y.Doc,<br/>
+    options: { writeDebounceMs?: number } = {}<br/>
+  )</code></b>
   <dd>
 Create a y-idb persistence provider. Specify docName as a unique string
 that identifies this document. In most cases, you want to use the same identifier
 that is used as the room-name in the connection provider.
+
+An optional <code>options.writeDebounceMs</code> (default <code>0</code>, which
+coalesces writes on a microtask) can be supplied to debounce and aggregate
+updates. All updates are serialized to at most 1 in-flight transaction to
+prevent WebKit database transaction hangs and silent write drops.
   </dd>
   <b><code>provider.on('synced', function(idbPersistence: IndexeddbPersistence))</code></b>
   <dd>
 The "synced" event is fired when the connection to the database has been established
 and all available content has been loaded. The event is also fired if no content
 is found for the given doc name.
+  </dd>
+  <b><code>provider.on('error', function(error: Error))</code></b>
+  <dd>
+The "error" event is fired when a database transaction or operation fails
+(e.g. QuotaExceededError, aborted transaction).
   </dd>
   <b><code>provider.set(key: any, value: any): Promise&lt;any&gt;</code></b>
   <dd>
