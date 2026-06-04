@@ -33,7 +33,7 @@ provider.on('synced', () => {
   <b><code>provider = new IndexeddbPersistence(<br/>
     docName: string,<br/>
     ydoc: Y.Doc,<br/>
-    options: { writeDebounceMs?: number } = {}<br/>
+    options: { writeDebounceMs?: number, durability?: 'default' | 'relaxed' } = {}<br/>
   )</code></b>
   <dd>
 Create a y-idb persistence provider. Specify docName as a unique string
@@ -44,6 +44,12 @@ An optional <code>options.writeDebounceMs</code> (default <code>0</code>, which
 coalesces writes on a microtask) can be supplied to debounce and aggregate
 updates. All updates are serialized to at most 1 in-flight transaction to
 prevent WebKit database transaction hangs and silent write drops.
+
+An optional <code>options.durability</code> (default <code>'default'</code>,
+which can be set to <code>'relaxed'</code>) controls the transaction
+durability guarantee passed to IndexedDB. Using <code>'relaxed'</code> can
+significantly improve write performance on some browsers/OS combinations by
+allowing the browser to cache transaction writes.
   </dd>
   <b><code>provider.on('synced', function(idbPersistence: IndexeddbPersistence))</code></b>
   <dd>
@@ -55,6 +61,12 @@ is found for the given doc name.
   <dd>
 The "error" event is fired when a database transaction or operation fails
 (e.g. QuotaExceededError, aborted transaction).
+  </dd>
+  <b><code>provider.on('retry-exhausted', function(error: Error))</code></b>
+  <dd>
+The "retry-exhausted" event is fired when the write retry count has exceeded
+the maximum limit (5 retries by default) after persistent database transaction
+failures.
   </dd>
   <b><code>provider.set(key: any, value: any): Promise&lt;any&gt;</code></b>
   <dd>

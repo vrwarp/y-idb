@@ -1,4 +1,3 @@
-
 import * as indexeddb from './y-idb.tests.js'
 
 import { runTests } from 'lib0/testing.js'
