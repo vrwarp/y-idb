@@ -1,6 +1,8 @@
-# y-indexeddb
+# y-idb
 
-> IndexedDB database provider for Yjs. [Documentation](https://docs.yjs.dev/ecosystem/database-provider/y-indexeddb)
+> IndexedDB database provider for Yjs (Fork of [`y-indexeddb`](https://github.com/yjs/y-indexeddb)).
+>
+> Official documentation: [docs.yjs.dev](https://docs.yjs.dev/ecosystem/database-provider/y-indexeddb)
 
 Use the IndexedDB database adapter to store your shared data persistently in
 the browser. The next time you join the session, your changes will still be
@@ -14,7 +16,7 @@ there.
 You find the complete documentation published online: [API documentation](https://docs.yjs.dev/ecosystem/database-provider/y-indexeddb).
 
 ```sh
-npm i --save y-indexeddb
+npm i --save y-idb
 ```
 
 ```js
@@ -30,7 +32,7 @@ provider.on('synced', () => {
 <dl>
   <b><code>provider = new IndexeddbPersistence(docName: string, ydoc: Y.Doc)</code></b>
   <dd>
-Create a y-indexeddb persistence provider. Specify docName as a unique string
+Create a y-idb persistence provider. Specify docName as a unique string
 that identifies this document. In most cases, you want to use the same identifier
 that is used as the room-name in the connection provider.
   </dd>

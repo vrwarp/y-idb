@@ -1,6 +1,6 @@
 
 import * as Y from 'yjs'
-import { IndexeddbPersistence, clearDocument, PREFERRED_TRIM_SIZE, fetchUpdates } from '../src/y-indexeddb.js'
+import { IndexeddbPersistence, clearDocument, PREFERRED_TRIM_SIZE, fetchUpdates } from '../src/y-idb.js'
 import * as t from 'lib0/testing.js'
 import * as promise from 'lib0/promise.js'
 

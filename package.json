@@ -1,11 +1,14 @@
 {
-  "name": "y-indexeddb",
+  "name": "y-idb",
   "version": "9.0.12",
-  "description": "IndexedDB database adapter for Yjs",
+  "description": "IndexedDB database adapter for Yjs (Fork of y-indexeddb)",
   "type": "module",
-  "main": "./dist/y-indexeddb.cjs",
-  "module": "./src/y-indexeddb.js",
-  "types": "./dist/src/y-indexeddb.d.ts",
+  "contributors": [
+    "Benson Tsai <btsai@vrwarp.com>"
+  ],
+  "main": "./dist/y-idb.cjs",
+  "module": "./src/y-idb.js",
+  "types": "./dist/src/y-idb.d.ts",
   "sideEffects": false,
   "funding": {
     "type": "GitHub Sponsors ❤",
@@ -15,6 +18,8 @@
     "clean": "rm -rf dist",
     "test": "npm run lint",
     "dist": "rollup -c",
+    "build": "npm run clean && tsc && rollup -c",
+    "prepare": "npm run build",
     "lint": "markdownlint README.md && standard && tsc",
     "preversion": "npm run clean && npm run lint && npm run dist",
     "debug": "concurrently 'rollup -wc' 'http-server -o .'"
@@ -25,11 +30,11 @@
   ],
   "exports": {
     ".": {
-      "types": "./dist/src/y-indexeddb.d.ts",
-      "module": "./src/y-indexeddb.js",
-      "import": "./src/y-indexeddb.js",
-      "require": "./dist/y-indexeddb.cjs",
-      "default": "./src/y-indexeddb.js"
+      "types": "./dist/src/y-idb.d.ts",
+      "module": "./src/y-idb.js",
+      "import": "./src/y-idb.js",
+      "require": "./dist/y-idb.cjs",
+      "default": "./src/y-idb.js"
     },
     "./package.json": "./package.json"
   },
@@ -42,7 +47,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yjs/y-indexeddb.git"
+    "url": "git+https://github.com/vrwarp/y-idb.git"
   },
   "keywords": [
     "Yjs",
@@ -55,7 +60,7 @@
   "author": "Kevin Jahns <kevin.jahns@protonmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/yjs/y-indexeddb/issues"
+    "url": "https://github.com/vrwarp/y-idb/issues"
   },
   "homepage": "https://yjs.dev",
   "dependencies": {

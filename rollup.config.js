@@ -13,10 +13,10 @@ export default [{
     commonjs()
   ]
 }, {
-  input: './src/y-indexeddb.js',
+  input: './src/y-idb.js',
   output: {
     name: 'Y',
-    file: 'dist/y-indexeddb.cjs',
+    file: 'dist/y-idb.cjs',
     format: 'cjs',
     sourcemap: true
   },
