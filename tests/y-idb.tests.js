@@ -17,7 +17,7 @@ export const testPerf = async tc => {
     const ydoc = new Y.Doc()
     const provider = new IndexeddbPersistence(tc.testName, ydoc)
     await provider.whenSynced
-    provider.destroy()
+    await provider.destroy()
   })
 }
 
@@ -54,8 +54,8 @@ export const testIdbUpdateAndMerge = async tc => {
   await fetchUpdates(persistence2)
   t.assert(arr2.length === PREFERRED_TRIM_SIZE + 1)
   t.assert(persistence1._dbsize === 1) // wait for dbsize === 0. db should be concatenated
-  persistence1.destroy()
-  persistence2.destroy()
+  await persistence1.destroy()
+  await persistence2.destroy()
 }
 
 /**
@@ -90,8 +90,8 @@ export const testIdbConcurrentMerge = async tc => {
   t.assert(persistence1._dbsize < 10)
   t.assert(persistence2._dbsize < 10)
   t.compareArrays(arr1.toArray(), arr2.toArray())
-  persistence1.destroy()
-  persistence2.destroy()
+  await persistence1.destroy()
+  await persistence2.destroy()
 }
 
 /**
@@ -111,7 +111,7 @@ export const testMetaStorage = async tc => {
   t.assert(resB === 'meta!')
   const resC = await persistence.get('obj')
   t.compareObjects(resC, { a: 4 })
-  persistence.destroy()
+  await persistence.destroy()
 }
 
 /**
@@ -124,7 +124,7 @@ export const testEarlyDestroy = async tc => {
   indexDBProvider.on('synced', () => {
     hasbeenSyced = true
   })
-  indexDBProvider.destroy()
+  await indexDBProvider.destroy()
   await new Promise((resolve) => setTimeout(resolve, 500))
   t.assert(!hasbeenSyced)
 }
@@ -167,8 +167,8 @@ export const testBoundedConcurrencyCoalescing = async tc => {
   await persistence2.whenSynced
   t.compareArrays(doc2.getArray('t').toArray(), [1, 2, 3])
 
-  persistence.destroy()
-  persistence2.destroy()
+  await persistence.destroy()
+  await persistence2.destroy()
 }
 
 /**
@@ -208,7 +208,7 @@ export const testWriteDebounce = async tc => {
   t.assert(txCount === 1, 'Should have flushed both updates now')
   t.assert(persistence._pendingUpdates.length === 0, 'Pending updates should be empty')
 
-  persistence.destroy()
+  await persistence.destroy()
 }
 
 /**
@@ -240,7 +240,7 @@ export const testErrorEmission = async tc => {
   t.assert(errorEmitted, 'Should have emitted an error')
   t.assert(persistence._pendingUpdates.length === 1, 'Failed updates should be re-buffered')
 
-  persistence.destroy()
+  await persistence.destroy()
 }
 
 /**
@@ -286,8 +286,8 @@ export const testFuzzingLoad = async tc => {
 
   t.compareArrays(doc.getArray('t').toArray(), doc2.getArray('t').toArray())
 
-  persistence.destroy()
-  persistence2.destroy()
+  await persistence.destroy()
+  await persistence2.destroy()
 }
 
 /**
@@ -355,8 +355,8 @@ export const testFuzzingConcurrentLoad = async tc => {
   // Both documents should converge to the exact same state
   t.compareArrays(arr1.toArray(), arr2.toArray())
 
-  persistence1.destroy()
-  persistence2.destroy()
+  await persistence1.destroy()
+  await persistence2.destroy()
 }
 
 /**
@@ -368,7 +368,7 @@ export const testExampleBasic = async tc => {
   const persistence = new IndexeddbPersistence(tc.testName, doc)
   await persistence.whenSynced
   t.compareArrays(doc.getArray('tasks').toArray(), ['Buy milk', 'Read a book'])
-  persistence.destroy()
+  await persistence.destroy()
 }
 
 /**
@@ -380,7 +380,7 @@ export const testExampleDebounce = async tc => {
   const persistence = new IndexeddbPersistence(tc.testName, doc)
   await persistence.whenSynced
   t.assert(doc.getText('editor').toString() === 'Hello World')
-  persistence.destroy()
+  await persistence.destroy()
 }
 
 /**
@@ -399,5 +399,5 @@ export const testExampleDurability = async tc => {
   const persistence = new IndexeddbPersistence(tc.testName, doc)
   await persistence.whenSynced
   t.compareArrays(doc.getArray('durability-store').toArray(), ['Final save state'])
-  persistence.destroy()
+  await persistence.destroy()
 }
