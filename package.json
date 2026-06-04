@@ -42,7 +42,8 @@
     "ignore": [
       "/dist",
       "/node_modules",
-      "/docs"
+      "/docs",
+      "/tests/node.js"
     ]
   },
   "repository": {
