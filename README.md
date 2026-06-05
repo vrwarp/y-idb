@@ -33,7 +33,11 @@ provider.on('synced', () => {
   <b><code>provider = new IndexeddbPersistence(<br/>
     docName: string,<br/>
     ydoc: Y.Doc,<br/>
-    options: { writeDebounceMs?: number, durability?: 'default' | 'relaxed' } = {}<br/>
+    options: {<br/>
+      writeDebounceMs?: number,<br/>
+      durability?: 'default' | 'relaxed',<br/>
+      transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;<br/>
+    } = {}<br/>
   )</code></b>
   <dd>
 Create a y-idb persistence provider. Specify docName as a unique string
@@ -50,6 +54,12 @@ which can be set to <code>'relaxed'</code>) controls the transaction
 durability guarantee passed to IndexedDB. Using <code>'relaxed'</code> can
 significantly improve write performance on some browsers/OS combinations by
 allowing the browser to cache transaction writes.
+
+An optional <code>options.transactionRunner</code> can be supplied to wrap
+or delegate the execution of internal write transactions (such as syncs,
+flushes, custom sets, or deletes) to a custom sequencer or global lock.
+This is useful for coordinating serialization across different databases or
+stores to prevent WebKit (Safari) transaction deadlocks/hangs.
   </dd>
   <b><code>provider.on('synced', function(idbPersistence: IndexeddbPersistence))</code></b>
   <dd>

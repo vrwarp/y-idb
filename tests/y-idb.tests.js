@@ -677,3 +677,120 @@ export const testRetryExhaustedEvent = async tc => {
   db.transaction = originalTransaction
   await persistence.destroy()
 }
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testTransactionRunner = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+
+  /** @type {string[]} */
+  const calls = []
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async work => {
+    calls.push('start')
+    const res = await work()
+    calls.push('end')
+    return res
+  }
+
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { transactionRunner: runner })
+
+  // Wait for initial sync
+  await persistence.whenSynced
+  await promise.wait(50)
+  // The initial fetchUpdates should have been called!
+  t.assert(calls.length === 2, 'transactionRunner should be called during sync')
+  t.assert(calls[0] === 'start')
+  t.assert(calls[1] === 'end')
+
+  // Clear calls list
+  calls.length = 0
+
+  // Test set
+  await persistence.set('test-key', 'value')
+  t.compareArrays(calls, ['start', 'end'], 'set should be wrapped in transactionRunner')
+
+  // Test del
+  calls.length = 0
+  await persistence.del('test-key')
+  t.compareArrays(calls, ['start', 'end'], 'del should be wrapped in transactionRunner')
+
+  // Test _flush (triggered by update)
+  calls.length = 0
+  doc.getArray('t').insert(0, [1])
+  // Wait for flush to run and resolve
+  await promise.wait(50)
+  t.compareArrays(calls, ['start', 'end'], '_flush should be wrapped in transactionRunner')
+
+  // Test storeState
+  calls.length = 0
+  await storeState(persistence, true)
+  t.compareArrays(calls, ['start', 'end'], 'storeState should be wrapped in transactionRunner')
+
+  // Test destroy
+  calls.length = 0
+  // queue an update to ensure destroy flushes
+  doc.getArray('t').insert(0, [2])
+  await persistence.destroy()
+  t.compareArrays(calls, ['start', 'end'], 'destroy flush should be wrapped in transactionRunner')
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testTransactionRunnerSerialization = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+
+  /** @type {string[]} */
+  const executionOrder = []
+  let tail = Promise.resolve()
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runExclusiveIdbWrite = work => {
+    const run = tail.then(work, work)
+    tail = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async (work) => {
+    return runExclusiveIdbWrite(async () => {
+      executionOrder.push('start')
+      await promise.wait(10)
+      const res = await work()
+      executionOrder.push('end')
+      return res
+    })
+  }
+
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { transactionRunner: runner })
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  executionOrder.length = 0
+
+  // Trigger two concurrent writes (set and del)
+  const p1 = persistence.set('key1', 'val1')
+  const p2 = persistence.del('key1')
+
+  await Promise.all([p1, p2])
+
+  // They must execute sequentially, i.e., start, end, start, end
+  t.compareArrays(executionOrder, ['start', 'end', 'start', 'end'])
+
+  await persistence.destroy()
+}

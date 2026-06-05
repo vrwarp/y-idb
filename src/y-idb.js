@@ -11,17 +11,30 @@ const updatesStoreName = 'updates'
 export const PREFERRED_TRIM_SIZE = 500
 
 /**
+ * @template T
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {() => Promise<T>} work
+ * @return {Promise<T>}
+ */
+const transactWrite = (idbPersistence, work) => {
+  if (idbPersistence.transactionRunner) {
+    return idbPersistence.transactionRunner(work)
+  }
+  return work()
+}
+
+/**
  * @param {IndexeddbPersistence} idbPersistence
  * @param {function(IDBObjectStore):any} [beforeApplyUpdatesCallback]
  * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
  * @return {Promise<any>}
  */
-export const fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback) => {
+const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback) => {
   if (idbPersistence._destroyed) return promise.resolve()
   if (!idbPersistence.db) {
     return idbPersistence._db.then(db => {
       idbPersistence.db = db
-      return fetchUpdates(idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback)
+      return _fetchUpdates(idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback)
     })
   }
   const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName], 'readwrite')
@@ -58,27 +71,38 @@ export const fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterAp
 
 /**
  * @param {IndexeddbPersistence} idbPersistence
+ * @param {function(IDBObjectStore):any} [beforeApplyUpdatesCallback]
+ * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
+ * @return {Promise<any>}
+ */
+export const fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback) =>
+  transactWrite(idbPersistence, () => _fetchUpdates(idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback))
+
+/**
+ * @param {IndexeddbPersistence} idbPersistence
  * @param {boolean} forceStore
  */
 export const storeState = (idbPersistence, forceStore = true) =>
-  fetchUpdates(idbPersistence)
-    .then(updatesStore => {
-      if (idbPersistence._destroyed) return
-      if (forceStore || idbPersistence._dbsize >= PREFERRED_TRIM_SIZE) {
-        return idb.addAutoKey(updatesStore, Y.encodeStateAsUpdate(idbPersistence.doc))
-          .then(() => {
-            if (idbPersistence._destroyed) return
-            return idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(idbPersistence._dbref, true))
-          })
-          .then(() => {
-            if (idbPersistence._destroyed) return
-            return idb.count(updatesStore).then(cnt => {
+  transactWrite(idbPersistence, () =>
+    _fetchUpdates(idbPersistence)
+      .then(updatesStore => {
+        if (idbPersistence._destroyed) return
+        if (forceStore || idbPersistence._dbsize >= PREFERRED_TRIM_SIZE) {
+          return idb.addAutoKey(updatesStore, Y.encodeStateAsUpdate(idbPersistence.doc))
+            .then(() => {
               if (idbPersistence._destroyed) return
-              idbPersistence._dbsize = cnt
+              return idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(idbPersistence._dbref, true))
             })
-          })
-      }
-    })
+            .then(() => {
+              if (idbPersistence._destroyed) return
+              return idb.count(updatesStore).then(cnt => {
+                if (idbPersistence._destroyed) return
+                idbPersistence._dbsize = cnt
+              })
+            })
+        }
+      })
+  )
 
 /**
  * @param {string} name
@@ -95,8 +119,9 @@ export class IndexeddbPersistence extends Observable {
    * @param {object} [opts]
    * @param {number} [opts.writeDebounceMs]
    * @param {'default'|'relaxed'} [opts.durability]
+   * @param {<T>(work: () => Promise<T>) => Promise<T>} [opts.transactionRunner]
    */
-  constructor (name, doc, { writeDebounceMs = 0, durability = 'default' } = {}) {
+  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner } = {}) {
     super()
     this.doc = doc
     this.name = name
@@ -105,8 +130,13 @@ export class IndexeddbPersistence extends Observable {
     this._destroyed = false
     this.writeDebounceMs = writeDebounceMs
     this.durability = durability
+    this.transactionRunner = transactionRunner
     this._retryCount = 0
     this._maxRetries = 5
+    /**
+     * @type {Promise<any>|null}
+     */
+    this._flushPromise = null
     /**
      * @type {Promise<void>|null}
      */
@@ -239,58 +269,66 @@ export class IndexeddbPersistence extends Observable {
     this._writing = true
     const batch = this._pendingUpdates
     this._pendingUpdates = []
-    /**
-     * @type {IDBTransaction}
-     */
-    let tx
-    try {
-      tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
-    } catch (e) {
-      this._pendingUpdates = batch.concat(this._pendingUpdates)
-      this._writing = false
-      this.emit('error', [e])
-      return
-    }
-    const store = tx.objectStore(updatesStoreName)
-    for (let i = 0; i < batch.length; i++) {
-      idb.addAutoKey(store, batch[i])
-    }
-    tx.oncomplete = () => {
-      this._retryCount = 0
-      this._dbsize += batch.length
-      this._writing = false
-      if (this._pendingUpdates.length > 0) {
-        this._scheduleFlush()
+    this._flushPromise = transactWrite(this, () => new Promise(resolve => {
+      /**
+       * @type {IDBTransaction}
+       */
+      let tx
+      try {
+        tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
+      } catch (e) {
+        this._pendingUpdates = batch.concat(this._pendingUpdates)
+        this._writing = false
+        this._flushPromise = null
+        this.emit('error', [e])
+        resolve(undefined)
+        return
       }
-      if (this._dbsize >= PREFERRED_TRIM_SIZE) {
-        if (this._storeTimeoutId !== null) {
-          clearTimeout(this._storeTimeoutId)
+      const store = tx.objectStore(updatesStoreName)
+      for (let i = 0; i < batch.length; i++) {
+        idb.addAutoKey(store, batch[i])
+      }
+      tx.oncomplete = () => {
+        this._retryCount = 0
+        this._dbsize += batch.length
+        this._writing = false
+        this._flushPromise = null
+        if (this._pendingUpdates.length > 0) {
+          this._scheduleFlush()
         }
-        this._storeTimeoutId = setTimeout(() => {
-          storeState(this, false)
-          this._storeTimeoutId = null
-        }, this._storeTimeout)
-      }
-    }
-    const onErrorOrAbort = () => {
-      this._pendingUpdates = batch.concat(this._pendingUpdates)
-      this._writing = false
-      this.emit('error', [tx.error])
-      if (!this._destroyed) {
-        this._retryCount++
-        if (this._retryCount <= this._maxRetries) {
-          const backoff = Math.pow(2, this._retryCount) * 100
-          setTimeout(() => {
-            this._scheduleFlush()
-          }, backoff)
-        } else {
-          this._retryCount = 0
-          this.emit('retry-exhausted', [tx.error || new Error('Retry exhausted')])
+        if (this._dbsize >= PREFERRED_TRIM_SIZE) {
+          if (this._storeTimeoutId !== null) {
+            clearTimeout(this._storeTimeoutId)
+          }
+          this._storeTimeoutId = setTimeout(() => {
+            storeState(this, false)
+            this._storeTimeoutId = null
+          }, this._storeTimeout)
         }
+        resolve(undefined)
       }
-    }
-    tx.onerror = onErrorOrAbort
-    tx.onabort = onErrorOrAbort
+      const onErrorOrAbort = () => {
+        this._pendingUpdates = batch.concat(this._pendingUpdates)
+        this._writing = false
+        this._flushPromise = null
+        this.emit('error', [tx.error])
+        if (!this._destroyed) {
+          this._retryCount++
+          if (this._retryCount <= this._maxRetries) {
+            const backoff = Math.pow(2, this._retryCount) * 100
+            setTimeout(() => {
+              this._scheduleFlush()
+            }, backoff)
+          } else {
+            this._retryCount = 0
+            this.emit('retry-exhausted', [tx.error || new Error('Retry exhausted')])
+          }
+        }
+        resolve(undefined)
+      }
+      tx.onerror = onErrorOrAbort
+      tx.onabort = onErrorOrAbort
+    }))
   }
 
   destroy () {
@@ -314,22 +352,24 @@ export class IndexeddbPersistence extends Observable {
     let flushPromise = Promise.resolve()
     if (db && this._pendingUpdates.length > 0) {
       const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
-      flushPromise = new Promise((resolve) => {
+      flushPromise = transactWrite(this, () => new Promise((resolve) => {
         try {
           const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
           const store = tx.objectStore(updatesStoreName)
           for (let i = 0; i < batch.length; i++) {
             idb.addAutoKey(store, batch[i])
           }
-          tx.oncomplete = () => resolve()
-          tx.onerror = tx.onabort = () => resolve()
+          tx.oncomplete = () => resolve(undefined)
+          tx.onerror = tx.onabort = () => resolve(undefined)
         } catch (e) {
-          resolve()
+          resolve(undefined)
         }
-      })
+      }))
     }
 
-    this._destroyPromise = flushPromise.then(() => this._db.then(db => {
+    const activeFlushPromise = this._flushPromise || Promise.resolve()
+
+    this._destroyPromise = Promise.all([flushPromise, activeFlushPromise]).then(() => this._db.then(db => {
       db.close()
     }))
     return this._destroyPromise
@@ -361,10 +401,12 @@ export class IndexeddbPersistence extends Observable {
    * @return {Promise<String | number | ArrayBuffer | Date>}
    */
   set (key, value) {
-    return this._db.then(db => {
-      const [custom] = idb.transact(db, [customStoreName])
-      return idb.put(custom, value, key)
-    })
+    return this._db.then(db =>
+      transactWrite(this, () => {
+        const [custom] = idb.transact(db, [customStoreName])
+        return idb.put(custom, value, key)
+      })
+    )
   }
 
   /**
@@ -372,9 +414,11 @@ export class IndexeddbPersistence extends Observable {
    * @return {Promise<undefined>}
    */
   del (key) {
-    return this._db.then(db => {
-      const [custom] = idb.transact(db, [customStoreName])
-      return idb.del(custom, key)
-    })
+    return this._db.then(db =>
+      transactWrite(this, () => {
+        const [custom] = idb.transact(db, [customStoreName])
+        return idb.del(custom, key)
+      })
+    )
   }
 }
