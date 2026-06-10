@@ -211,7 +211,10 @@ export class IndexeddbPersistence extends Observable {
           for (let i = 0; i < batch.length; i++) {
             store.add(batch[i])
           }
+          let handled = false
           tx.onerror = tx.onabort = () => {
+            if (handled) return
+            handled = true
             if (!this._destroyed) {
               this._pendingUpdates = batch.concat(this._pendingUpdates)
             }
@@ -304,7 +307,12 @@ export class IndexeddbPersistence extends Observable {
         }
         resolve(undefined)
       }
+      // A failed transaction fires a bubbling 'error' event for every pending
+      // request and then 'abort' — guard so one failure is handled once.
+      let handled = false
       const onErrorOrAbort = () => {
+        if (handled) return
+        handled = true
         this._pendingUpdates = batch.concat(this._pendingUpdates)
         this._writing = false
         this._flushPromise = null

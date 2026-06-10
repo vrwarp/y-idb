@@ -3,6 +3,7 @@ import { IndexeddbPersistence, clearDocument, PREFERRED_TRIM_SIZE, fetchUpdates,
 import * as t from 'lib0/testing.js'
 import * as promise from 'lib0/promise.js'
 import * as prng from 'lib0/prng.js'
+import * as idb from 'lib0/indexeddb.js'
 import { runBasicExample } from '../examples/basic.js'
 import { runDebounceExample } from '../examples/debounce.js'
 import { runErrorHandlingExample } from '../examples/error-handling.js'
@@ -726,6 +727,64 @@ export const testAbortedFlushDoesNotLeakRejections = async tc => {
 
   await persistence.destroy()
   await persistence2.destroy()
+}
+
+/**
+ * One aborted transaction must be handled exactly once, even though the
+ * browser fires a bubbling 'error' event per pending request plus 'abort':
+ * one 'error' emission, one retry-count increment, one batch re-buffer —
+ * and after the retry succeeds the store must not contain duplicates.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAbortedFlushHandledOnce = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  // Let the constructor's initial-sync chain (and its trailing
+  // _scheduleFlush) fully settle so it cannot race with the failure below.
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  let intercepted = false
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    const tx = originalTransaction.call(this, storeNames, mode, options)
+    if (!intercepted && storeNames.includes('updates') && mode === 'readwrite') {
+      intercepted = true
+      // Abort while all three add() requests are still pending so that three
+      // bubbling request error events reach the transaction before 'abort'.
+      queueMicrotask(() => {
+        try { tx.abort() } catch (e) {}
+      })
+    }
+    return tx
+  }
+
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  doc.getArray('t').insert(0, [1])
+  doc.getArray('t').insert(1, [2])
+  doc.getArray('t').insert(2, [3])
+
+  // Inspect state after the abort but before the 200ms backoff retry
+  await promise.wait(50)
+  t.assert(intercepted, 'flush transaction should have been intercepted')
+  t.assert(errorEvents === 1, `one failure should emit one error event (got ${errorEvents})`)
+  t.assert(persistence._retryCount === 1, `one failure should count as one retry (got ${persistence._retryCount})`)
+  t.assert(persistence._pendingUpdates.length === 3, `batch should be re-buffered exactly once (got ${persistence._pendingUpdates.length})`)
+
+  // Let the retry flush against the working db, then check for duplicates
+  await promise.wait(500)
+  t.assert(persistence._pendingUpdates.length === 0, 'retry should have flushed the batch')
+  const [updatesStore] = idb.transact(db, ['updates'], 'readonly')
+  const cnt = await idb.count(updatesStore)
+  t.assert(cnt === 3, `store should hold exactly the 3 updates, no duplicates (got ${cnt})`)
+
+  await persistence.destroy()
 }
 
 /**
