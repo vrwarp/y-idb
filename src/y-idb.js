@@ -165,7 +165,10 @@ export class IndexeddbPersistence extends Observable {
       const beforeApplyUpdatesCallback = (updatesStore) => {
         const initUpdate = Y.encodeStateAsUpdate(doc)
         if (initUpdate.length > 2) {
-          return idb.addAutoKey(updatesStore, initUpdate)
+          // Use the raw request instead of the lib0 promise wrapper: the
+          // promise would be discarded, so a transaction failure would
+          // surface as an unhandled rejection instead of the tx error event.
+          updatesStore.add(initUpdate)
         }
       }
       const afterApplyUpdatesCallback = () => {
@@ -206,7 +209,7 @@ export class IndexeddbPersistence extends Observable {
           const tx = this.db.transaction([updatesStoreName], 'readwrite')
           const store = tx.objectStore(updatesStoreName)
           for (let i = 0; i < batch.length; i++) {
-            idb.addAutoKey(store, batch[i])
+            store.add(batch[i])
           }
           tx.onerror = tx.onabort = () => {
             if (!this._destroyed) {
@@ -280,7 +283,7 @@ export class IndexeddbPersistence extends Observable {
       }
       const store = tx.objectStore(updatesStoreName)
       for (let i = 0; i < batch.length; i++) {
-        idb.addAutoKey(store, batch[i])
+        store.add(batch[i])
       }
       tx.oncomplete = () => {
         this._retryCount = 0
@@ -351,7 +354,7 @@ export class IndexeddbPersistence extends Observable {
           const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
           const store = tx.objectStore(updatesStoreName)
           for (let i = 0; i < batch.length; i++) {
-            idb.addAutoKey(store, batch[i])
+            store.add(batch[i])
           }
           tx.oncomplete = () => resolve(undefined)
           tx.onerror = tx.onabort = () => resolve(undefined)

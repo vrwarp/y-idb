@@ -679,6 +679,56 @@ export const testRetryExhaustedEvent = async tc => {
 }
 
 /**
+ * Aborting a flush transaction while its add() requests are still pending
+ * must not produce unhandled promise rejections (the node test harness turns
+ * any unhandled rejection into a suite failure) and the updates must be
+ * recovered by the retry.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAbortedFlushDoesNotLeakRejections = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  let intercepted = false
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    const tx = originalTransaction.call(this, storeNames, mode, options)
+    if (!intercepted && storeNames.includes('updates') && mode === 'readwrite') {
+      intercepted = true
+      // Abort on a microtask: after _flush queued its add() requests
+      // synchronously, before any of them has executed.
+      queueMicrotask(() => {
+        try { tx.abort() } catch (e) {}
+      })
+    }
+    return tx
+  }
+
+  doc.getArray('t').insert(0, [1])
+  doc.getArray('t').insert(1, [2])
+  doc.getArray('t').insert(2, [3])
+
+  // Wait for the abort and the backoff retry against the restored db
+  await promise.wait(500)
+  t.assert(intercepted, 'flush transaction should have been intercepted')
+  t.assert(persistence._pendingUpdates.length === 0, 'updates should be flushed by the retry')
+
+  // Verify the data survived in a fresh instance
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1, 2, 3])
+
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunner = async tc => {
