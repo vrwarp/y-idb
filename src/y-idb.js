@@ -178,6 +178,15 @@ export class IndexeddbPersistence extends Observable {
       }
       fetchUpdates(this, beforeApplyUpdatesCallback, afterApplyUpdatesCallback).then(() => {
         this._scheduleFlush()
+      }, err => {
+        // Initial sync failed (corrupt database, failing transactionRunner,
+        // ...). Surface it instead of leaving an unhandled rejection, and
+        // still start flushing: the connection itself is open, so buffered
+        // updates can be persisted.
+        if (!this._destroyed) {
+          this.emit('error', [err])
+        }
+        this._scheduleFlush()
       })
     })
     /**
@@ -256,6 +265,32 @@ export class IndexeddbPersistence extends Observable {
     }
   }
 
+  /**
+   * Recover from a failed flush attempt: re-buffer the batch, surface the
+   * error, and schedule a retry with exponential backoff.
+   *
+   * @param {Array<Uint8Array>} batch
+   * @param {any} err
+   */
+  _onFlushFailed (batch, err) {
+    this._pendingUpdates = batch.concat(this._pendingUpdates)
+    this._writing = false
+    this._flushPromise = null
+    this.emit('error', [err])
+    if (!this._destroyed) {
+      this._retryCount++
+      if (this._retryCount <= this._maxRetries) {
+        const backoff = Math.pow(2, this._retryCount) * 100
+        setTimeout(() => {
+          this._scheduleFlush()
+        }, backoff)
+      } else {
+        this._retryCount = 0
+        this.emit('retry-exhausted', [err || new Error('Retry exhausted')])
+      }
+    }
+  }
+
   _flush () {
     if (this._destroyed || this._writing || this._pendingUpdates.length === 0) return
     const db = this.db
@@ -269,6 +304,10 @@ export class IndexeddbPersistence extends Observable {
     this._writing = true
     const batch = this._pendingUpdates
     this._pendingUpdates = []
+    // Tracks whether the flush work below ran to a conclusion. If the
+    // transactionRunner rejects without it, recovery happens in the chained
+    // rejection handler instead.
+    let settled = false
     this._flushPromise = transactWrite(this, () => new Promise(resolve => {
       /**
        * @type {IDBTransaction}
@@ -277,10 +316,8 @@ export class IndexeddbPersistence extends Observable {
       try {
         tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
       } catch (e) {
-        this._pendingUpdates = batch.concat(this._pendingUpdates)
-        this._writing = false
-        this._flushPromise = null
-        this.emit('error', [e])
+        settled = true
+        this._onFlushFailed(batch, e)
         resolve(undefined)
         return
       }
@@ -289,6 +326,7 @@ export class IndexeddbPersistence extends Observable {
         store.add(batch[i])
       }
       tx.oncomplete = () => {
+        settled = true
         this._retryCount = 0
         this._dbsize += batch.length
         this._writing = false
@@ -313,27 +351,20 @@ export class IndexeddbPersistence extends Observable {
       const onErrorOrAbort = () => {
         if (handled) return
         handled = true
-        this._pendingUpdates = batch.concat(this._pendingUpdates)
-        this._writing = false
-        this._flushPromise = null
-        this.emit('error', [tx.error])
-        if (!this._destroyed) {
-          this._retryCount++
-          if (this._retryCount <= this._maxRetries) {
-            const backoff = Math.pow(2, this._retryCount) * 100
-            setTimeout(() => {
-              this._scheduleFlush()
-            }, backoff)
-          } else {
-            this._retryCount = 0
-            this.emit('retry-exhausted', [tx.error || new Error('Retry exhausted')])
-          }
-        }
+        settled = true
+        this._onFlushFailed(batch, tx.error)
         resolve(undefined)
       }
       tx.onerror = onErrorOrAbort
       tx.onabort = onErrorOrAbort
-    }))
+    })).then(() => {}, err => {
+      // The transactionRunner itself failed. Without this, _writing would
+      // stay true forever and every future update would silently pile up in
+      // _pendingUpdates without ever being written.
+      if (!settled) {
+        this._onFlushFailed(batch, err)
+      }
+    })
   }
 
   destroy () {
@@ -384,7 +415,11 @@ export class IndexeddbPersistence extends Observable {
               this.emit('error', [e])
               resolve(undefined)
             }
-          }))
+          })).catch(err => {
+            // transactionRunner failure during the final flush — nothing
+            // more can be done at teardown beyond surfacing it.
+            this.emit('error', [err])
+          })
         }
       })
       .then(() => this._db.then(db => { db.close() }, () => {}))

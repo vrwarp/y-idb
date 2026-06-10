@@ -897,6 +897,106 @@ export const testTransactionRunner = async tc => {
 }
 
 /**
+ * A transactionRunner whose returned promise rejects must not wedge the
+ * provider: the batch is re-buffered, 'error' is emitted, a later flush
+ * persists everything, and destroy() still resolves.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTransactionRunnerFailureRecovery = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+
+  let failNext = false
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async work => {
+    if (failNext) {
+      failNext = false
+      throw new Error('runner transient failure')
+    }
+    return work()
+  }
+
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { transactionRunner: runner })
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  failNext = true
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(50)
+  t.assert(errorEvents === 1, 'runner failure should emit an error event')
+  t.assert(!persistence._writing, '_writing must not stay stuck after a runner failure')
+  t.assert(persistence._pendingUpdates.length === 1, 'failed batch should be re-buffered')
+
+  // The backoff retry (200ms) flushes against the now-healthy runner
+  await promise.wait(300)
+  t.assert(persistence._pendingUpdates.length === 0, 'retry should have flushed the batch')
+
+  const destroyOutcome = await persistence.destroy().then(() => 'resolved', () => 'rejected')
+  t.assert(destroyOutcome === 'resolved', 'destroy must resolve after a recovered runner failure')
+
+  // Verify the update was persisted
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1])
+  await persistence2.destroy()
+}
+
+/**
+ * A failure during the initial sync (e.g. a failing transactionRunner) must
+ * surface through the 'error' event instead of an unhandled rejection, and
+ * updates must still be persisted through the open connection.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testInitialSyncFailureEmitsError = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+
+  let failNext = true
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async work => {
+    if (failNext) {
+      failNext = false
+      throw new Error('initial sync failure')
+    }
+    return work()
+  }
+
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { transactionRunner: runner })
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  await promise.wait(100)
+  t.assert(errorEvents === 1, 'initial sync failure should emit an error event')
+  t.assert(!persistence.synced, 'provider must not claim to be synced')
+
+  // Updates made after the failed sync are still written
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(100)
+
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1])
+
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunnerSerialization = async tc => {
