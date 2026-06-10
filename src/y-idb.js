@@ -296,7 +296,7 @@ export class IndexeddbPersistence extends Observable {
         if (this._pendingUpdates.length > 0) {
           this._scheduleFlush()
         }
-        if (this._dbsize >= PREFERRED_TRIM_SIZE) {
+        if (!this._destroyed && this._dbsize >= PREFERRED_TRIM_SIZE) {
           if (this._storeTimeoutId !== null) {
             clearTimeout(this._storeTimeoutId)
           }
@@ -340,8 +340,9 @@ export class IndexeddbPersistence extends Observable {
     if (this._destroyPromise) {
       return this._destroyPromise
     }
-    if (this._storeTimeoutId) {
+    if (this._storeTimeoutId !== null) {
       clearTimeout(this._storeTimeoutId)
+      this._storeTimeoutId = null
     }
     this.doc.off('update', this._storeUpdate)
     this.doc.off('destroy', this.destroy)
@@ -353,30 +354,43 @@ export class IndexeddbPersistence extends Observable {
       document.removeEventListener('visibilitychange', this._visibilityListener)
     }
 
-    const db = this.db
-    let flushPromise = Promise.resolve()
-    if (db && this._pendingUpdates.length > 0) {
-      const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
-      flushPromise = transactWrite(this, () => new Promise((resolve) => {
-        try {
-          const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
-          const store = tx.objectStore(updatesStoreName)
-          for (let i = 0; i < batch.length; i++) {
-            store.add(batch[i])
-          }
-          tx.oncomplete = () => resolve(undefined)
-          tx.onerror = tx.onabort = () => resolve(undefined)
-        } catch (e) {
-          resolve(undefined)
+    // Wait for an in-flight flush to settle before writing the remaining
+    // pending updates: if that flush fails it re-buffers its batch into
+    // _pendingUpdates, so snapshotting the queue only afterwards guarantees
+    // the failed batch is included in the final write instead of lost.
+    const activeFlushPromise = (this._flushPromise || Promise.resolve()).then(() => {}, () => {})
+    this._destroyPromise = activeFlushPromise
+      .then(() => {
+        const db = this.db
+        if (db && this._pendingUpdates.length > 0) {
+          const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
+          return transactWrite(this, () => new Promise((resolve) => {
+            try {
+              const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
+              const store = tx.objectStore(updatesStoreName)
+              for (let i = 0; i < batch.length; i++) {
+                store.add(batch[i])
+              }
+              tx.oncomplete = () => resolve(undefined)
+              let handled = false
+              tx.onerror = tx.onabort = () => {
+                if (!handled) {
+                  handled = true
+                  this.emit('error', [tx.error])
+                }
+                resolve(undefined)
+              }
+            } catch (e) {
+              this.emit('error', [e])
+              resolve(undefined)
+            }
+          }))
         }
-      }))
-    }
-
-    const activeFlushPromise = this._flushPromise || Promise.resolve()
-
-    this._destroyPromise = Promise.all([flushPromise, activeFlushPromise]).then(() => this._db.then(db => {
-      db.close()
-    }))
+      })
+      .then(() => this._db.then(db => { db.close() }, () => {}))
+      .then(() => {
+        super.destroy()
+      })
     return this._destroyPromise
   }
 

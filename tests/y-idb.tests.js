@@ -788,6 +788,52 @@ export const testAbortedFlushHandledOnce = async tc => {
 }
 
 /**
+ * If destroy() is called while a flush is in flight and that flush then
+ * fails, the failed batch is re-buffered into _pendingUpdates after destroy
+ * already snapshotted the queue. destroy must wait for the in-flight flush
+ * to settle and persist the re-buffered batch in its final write.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyPersistsFailedInflightFlush = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  /** @type {any} */
+  let flushTx = null
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    const tx = originalTransaction.call(this, storeNames, mode, options)
+    if (flushTx === null && storeNames.includes('updates') && mode === 'readwrite') {
+      flushTx = tx
+    }
+    return tx
+  }
+
+  doc.getArray('t').insert(0, [1])
+  // One microtask hop: the flush microtask queued by the insert runs first,
+  // so the transaction is created but its requests have not executed yet.
+  await Promise.resolve()
+  t.assert(persistence._writing, 'flush should be in flight')
+  const destroyPromise = persistence.destroy()
+  // Fail the in-flight flush after destroy snapshotted the pending queue
+  flushTx.abort()
+  await destroyPromise
+
+  // The update must have been persisted by destroy's final write
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1])
+  await persistence2.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunner = async tc => {
