@@ -1,6 +1,6 @@
 {
   "name": "y-idb",
-  "version": "9.0.12",
+  "version": "9.1.0",
   "description": "IndexedDB database adapter for Yjs (Fork of y-indexeddb)",
   "type": "module",
   "contributors": [
@@ -10,10 +10,6 @@
   "module": "./src/y-idb.js",
   "types": "./dist/src/y-idb.d.ts",
   "sideEffects": false,
-  "funding": {
-    "type": "GitHub Sponsors ❤",
-    "url": "https://github.com/sponsors/dmonad"
-  },
   "scripts": {
     "clean": "rm -rf dist",
     "test": "npm run lint && c8 node tests/node.js",
@@ -69,7 +65,7 @@
   "bugs": {
     "url": "https://github.com/vrwarp/y-idb/issues"
   },
-  "homepage": "https://yjs.dev",
+  "homepage": "https://vrwarp.github.io/y-idb/",
   "dependencies": {
     "lib0": "^0.2.74"
   },
