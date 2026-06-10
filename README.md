@@ -36,7 +36,8 @@ provider.on('synced', () => {
     options: {<br/>
       writeDebounceMs?: number,<br/>
       durability?: 'default' | 'relaxed',<br/>
-      transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;<br/>
+      transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;,<br/>
+      maxRetries?: number<br/>
     } = {}<br/>
   )</code></b>
   <dd>
@@ -60,6 +61,11 @@ or delegate the execution of internal write transactions (such as syncs,
 flushes, custom sets, or deletes) to a custom sequencer or global lock.
 This is useful for coordinating serialization across different databases or
 stores to prevent WebKit (Safari) transaction deadlocks/hangs.
+
+An optional <code>options.maxRetries</code> (default <code>5</code>) controls
+how often a failed write is retried with exponential backoff
+(200ms, 400ms, 800ms, ...) before the <code>retry-exhausted</code> event is
+emitted.
   </dd>
   <b><code>provider.on('synced', function(idbPersistence: IndexeddbPersistence))</code></b>
   <dd>

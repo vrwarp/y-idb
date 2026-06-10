@@ -114,8 +114,10 @@ export class IndexeddbPersistence extends Observable {
    * @param {number} [opts.writeDebounceMs]
    * @param {'default'|'relaxed'} [opts.durability]
    * @param {<T>(work: () => Promise<T>) => Promise<T>} [opts.transactionRunner]
+   * @param {number} [opts.maxRetries] Number of times a failed write is
+   * retried with exponential backoff before 'retry-exhausted' is emitted.
    */
-  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner } = {}) {
+  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner, maxRetries = 5 } = {}) {
     super()
     this.doc = doc
     this.name = name
@@ -126,7 +128,7 @@ export class IndexeddbPersistence extends Observable {
     this.durability = durability
     this.transactionRunner = transactionRunner
     this._retryCount = 0
-    this._maxRetries = 5
+    this._maxRetries = maxRetries
     /**
      * Pending backoff timer after a failed flush. While it is armed, flush
      * scheduling is deferred to it so the backoff cannot be bypassed.

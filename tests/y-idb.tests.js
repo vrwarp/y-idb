@@ -957,6 +957,34 @@ export const testBackoffNotBypassedByNewUpdates = async tc => {
 /**
  * @param {t.TestCase} tc
  */
+export const testMaxRetriesOption = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { maxRetries: 0 })
+  t.assert(persistence._maxRetries === 0)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  db.transaction = () => {
+    throw new Error('Persistent failure')
+  }
+
+  let retryExhausted = 0
+  persistence.on('retry-exhausted', () => { retryExhausted++ })
+
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(50)
+  t.assert(retryExhausted === 1, 'with maxRetries 0 the first failure should exhaust retries')
+
+  db.transaction = originalTransaction
+  await persistence.destroy()
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
 export const testTransactionRunner = async tc => {
   await clearDocument(tc.testName)
   const doc = new Y.Doc()
