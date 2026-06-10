@@ -872,6 +872,36 @@ export const testTrimFailureEmitsError = async tc => {
 }
 
 /**
+ * The debounced trim must fire even while writes keep coming in faster than
+ * the trim timeout — previously every flush completion reset the timer, so
+ * sustained writing postponed compaction indefinitely.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTrimRunsDuringSustainedWrites = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const arr = doc.getArray('t')
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  // Pretend the store is already over the trim threshold, then keep writing
+  // with gaps well below the 100ms trim timeout.
+  persistence._storeTimeout = 100
+  persistence._dbsize = PREFERRED_TRIM_SIZE
+  for (let i = 0; i < 12; i++) {
+    arr.insert(0, [i])
+    await promise.wait(30)
+  }
+
+  // storeState must have run within the write loop (~360ms > 100ms timeout),
+  // re-counting _dbsize down to the real number of stored records.
+  t.assert(persistence._dbsize < 100, `trim should have run during sustained writes (dbsize ${persistence._dbsize})`)
+  await persistence.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunner = async tc => {

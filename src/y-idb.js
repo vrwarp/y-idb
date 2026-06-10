@@ -334,10 +334,10 @@ export class IndexeddbPersistence extends Observable {
         if (this._pendingUpdates.length > 0) {
           this._scheduleFlush()
         }
-        if (!this._destroyed && this._dbsize >= PREFERRED_TRIM_SIZE) {
-          if (this._storeTimeoutId !== null) {
-            clearTimeout(this._storeTimeoutId)
-          }
+        // Schedule a compaction if none is pending yet. Don't reset a
+        // pending timer: under sustained writes that would postpone the trim
+        // indefinitely and let the store grow without bound.
+        if (!this._destroyed && this._dbsize >= PREFERRED_TRIM_SIZE && this._storeTimeoutId === null) {
           this._storeTimeoutId = setTimeout(() => {
             this._storeTimeoutId = null
             // storeState can fail synchronously (transact on a closing db
