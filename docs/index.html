@@ -438,7 +438,7 @@
         
         <h2>Key Benefits</h2>
         <ul style="margin-left: 20px; color: var(--text-muted); font-size: 15px; display: flex; flex-direction: column; gap: 8px;">
-          <li><strong>Bounded Concurrency:</strong> Restricts writes to at most 1 in-flight transaction, completely eliminating IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers).</li>
+          <li><strong>Bounded Concurrency:</strong> The update flusher keeps at most 1 in-flight flush transaction, greatly reducing IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers). Other operations (<code>set</code>/<code>del</code>, compaction, the page-hide flush, the final flush in <code>destroy()</code>) open their own transactions; a custom <code>transactionRunner</code> can serialize all writes.</li>
           <li><strong>Microtask Batching:</strong> Automatically bundles synchronous or high-frequency updates into a single write transaction with sub-millisecond latency.</li>
           <li><strong>Durability Safeguards:</strong> Best-effort flush listeners queue and persist memory updates on page hide, document destruction, and tab close.</li>
           <li><strong>Error Handling:</strong> Propagates database transaction errors (such as <code>QuotaExceededError</code>) through an Observable event emitter, preventing silent data drops.</li>
@@ -477,7 +477,7 @@ provider.on('synced', () => {
 
         <div class="api-entry">
           <div class="api-sig">provider.on('error', (err: Error) => void)</div>
-          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with a 500ms backoff.</p>
+          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update.</p>
         </div>
 
         <div class="api-entry">
@@ -566,6 +566,8 @@ provider.on('synced', () => {
     let flushScheduled = false;
     let dbRows = 0;
     let updateIdCounter = 1;
+    let retryCount = 0;
+    const maxRetries = 5;
 
     const debounceInput = document.getElementById('debounce');
     const errCheck = document.getElementById('err-check');
@@ -665,17 +667,27 @@ provider.on('synced', () => {
           pipelineStatus.textContent = 'Transaction Aborted';
 
           log(`Transaction Error (QuotaExceededError): Aborted transaction. Emitting 'error' event.`, 'error');
-          log(`Failed batch prepended back to memory buffer. Applying 500ms retry backoff.`, 'error');
-          
           updateUI();
 
-          setTimeout(() => {
+          retryCount++;
+          if (retryCount <= maxRetries) {
+            const backoff = Math.pow(2, retryCount) * 100;
+            log(`Failed batch prepended back to memory buffer. Retry ${retryCount}/${maxRetries} in ${backoff}ms (exponential backoff).`, 'error');
+            setTimeout(() => {
+              pipelineBox.classList.remove('stage-box-error');
+              pipelineStatus.className = 'status-idle';
+              pipelineStatus.textContent = 'Idle';
+              scheduleFlush();
+            }, backoff);
+          } else {
+            retryCount = 0;
+            log(`Retry limit exceeded. Emitting 'retry-exhausted' event. Updates stay buffered until the next document update.`, 'error');
             pipelineBox.classList.remove('stage-box-error');
             pipelineStatus.className = 'status-idle';
             pipelineStatus.textContent = 'Idle';
-            scheduleFlush();
-          }, 500);
+          }
         } else {
+          retryCount = 0;
           dbRows += batch.length;
           writing = false;
           pipelineBox.innerHTML = '';
