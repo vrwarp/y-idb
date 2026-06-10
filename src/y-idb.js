@@ -339,8 +339,21 @@ export class IndexeddbPersistence extends Observable {
             clearTimeout(this._storeTimeoutId)
           }
           this._storeTimeoutId = setTimeout(() => {
-            storeState(this, false)
             this._storeTimeoutId = null
+            // storeState can fail synchronously (transact on a closing db
+            // throws) or asynchronously — surface both via 'error' instead
+            // of an uncaught exception / unhandled rejection.
+            try {
+              storeState(this, false).catch(err => {
+                if (!this._destroyed) {
+                  this.emit('error', [err])
+                }
+              })
+            } catch (err) {
+              if (!this._destroyed) {
+                this.emit('error', [err])
+              }
+            }
           }, this._storeTimeout)
         }
         resolve(undefined)

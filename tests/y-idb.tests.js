@@ -834,6 +834,44 @@ export const testDestroyPersistsFailedInflightFlush = async tc => {
 }
 
 /**
+ * A failure of the debounced trim (storeState) must surface through the
+ * 'error' event instead of an uncaught exception or unhandled rejection.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTrimFailureEmitsError = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  // Make the next flush completion schedule a trim in 100ms
+  persistence._storeTimeout = 100
+  persistence._dbsize = PREFERRED_TRIM_SIZE
+  doc.getArray('t').insert(0, [1])
+
+  // Let the flush complete, then break the database before the trim runs
+  await promise.wait(30)
+  t.assert(persistence._pendingUpdates.length === 0, 'flush should have completed')
+  t.assert(errorEvents === 0, 'no error before the trim runs')
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  db.transaction = () => {
+    throw new Error('Simulated trim failure')
+  }
+
+  await promise.wait(250)
+  t.assert(errorEvents === 1, `trim failure should emit one error event (got ${errorEvents})`)
+
+  db.transaction = originalTransaction
+  await persistence.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunner = async tc => {
