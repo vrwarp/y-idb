@@ -902,6 +902,59 @@ export const testTrimRunsDuringSustainedWrites = async tc => {
 }
 
 /**
+ * After a flush failure, new incoming updates must not trigger an immediate
+ * retry that bypasses the exponential backoff window.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testBackoffNotBypassedByNewUpdates = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  let txAttempts = 0
+  let failOnce = true
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    if (storeNames.includes('updates') && mode === 'readwrite') {
+      txAttempts++
+      if (failOnce) {
+        failOnce = false
+        throw new Error('transient failure')
+      }
+    }
+    return originalTransaction.call(this, storeNames, mode, options)
+  }
+
+  // First update fails and arms a 200ms backoff timer
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(20)
+  t.assert(txAttempts === 1, 'first flush should have been attempted')
+
+  // A new update inside the backoff window must not flush immediately
+  doc.getArray('t').insert(1, [2])
+  await promise.wait(80) // now ~100ms after the failure, backoff is 200ms
+  t.assert(txAttempts === 1, `no retry before the backoff expires (got ${txAttempts} attempts)`)
+
+  // After the backoff, one retry writes both updates
+  await promise.wait(200)
+  t.assert(txAttempts === 2, `backoff retry should be the second attempt (got ${txAttempts})`)
+  t.assert(persistence._pendingUpdates.length === 0, 'retry should have flushed both updates')
+
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1, 2])
+
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunner = async tc => {

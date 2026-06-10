@@ -128,6 +128,12 @@ export class IndexeddbPersistence extends Observable {
     this._retryCount = 0
     this._maxRetries = 5
     /**
+     * Pending backoff timer after a failed flush. While it is armed, flush
+     * scheduling is deferred to it so the backoff cannot be bypassed.
+     * @type {any}
+     */
+    this._retryTimeoutId = null
+    /**
      * @type {Promise<any>|null}
      */
     this._flushPromise = null
@@ -250,6 +256,9 @@ export class IndexeddbPersistence extends Observable {
 
   _scheduleFlush () {
     if (this._destroyed || this._writing || this._pendingUpdates.length === 0) return
+    // A failed flush armed a backoff timer that will reschedule; flushing
+    // now (e.g. because a new update arrived) would bypass the backoff.
+    if (this._retryTimeoutId !== null) return
     if (this._flushScheduled) return
     this._flushScheduled = true
     if (this.writeDebounceMs > 0) {
@@ -281,7 +290,8 @@ export class IndexeddbPersistence extends Observable {
       this._retryCount++
       if (this._retryCount <= this._maxRetries) {
         const backoff = Math.pow(2, this._retryCount) * 100
-        setTimeout(() => {
+        this._retryTimeoutId = setTimeout(() => {
+          this._retryTimeoutId = null
           this._scheduleFlush()
         }, backoff)
       } else {
@@ -387,6 +397,10 @@ export class IndexeddbPersistence extends Observable {
     if (this._storeTimeoutId !== null) {
       clearTimeout(this._storeTimeoutId)
       this._storeTimeoutId = null
+    }
+    if (this._retryTimeoutId !== null) {
+      clearTimeout(this._retryTimeoutId)
+      this._retryTimeoutId = null
     }
     this.doc.off('update', this._storeUpdate)
     this.doc.off('destroy', this.destroy)
