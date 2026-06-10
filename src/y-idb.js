@@ -38,13 +38,7 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
     })
   }
   const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName], 'readwrite')
-  /**
-   * @type {Array<Uint8Array>}
-   */
-  const updates = []
-  return idb.iterate(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false), (val) => {
-    updates.push(val)
-  }).then(() => {
+  return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false)).then(updates => {
     if (idbPersistence._destroyed) return
     if (beforeApplyUpdatesCallback) beforeApplyUpdatesCallback(updatesStore)
     Y.transact(idbPersistence.doc, () => {
