@@ -482,7 +482,7 @@ provider.on('synced', () => {
 
         <div class="api-entry">
           <div class="api-sig">provider.destroy(): Promise&lt;void&gt;</div>
-          <p>Flushes all pending buffer updates to IndexedDB and closes the database connection.</p>
+          <p>Waits for any in-flight write to settle, performs a best-effort flush of all remaining buffered updates, and closes the database connection. Always resolves; a failure of the final write is reported through the <code>error</code> event.</p>
         </div>
 
         <div class="api-entry">
