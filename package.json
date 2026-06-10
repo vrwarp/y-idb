@@ -1,6 +1,6 @@
 {
   "name": "y-idb",
-  "version": "9.0.12",
+  "version": "9.1.0",
   "description": "IndexedDB database adapter for Yjs (Fork of y-indexeddb)",
   "type": "module",
   "contributors": [
@@ -10,30 +10,32 @@
   "module": "./src/y-idb.js",
   "types": "./dist/src/y-idb.d.ts",
   "sideEffects": false,
-  "funding": {
-    "type": "GitHub Sponsors ❤",
-    "url": "https://github.com/sponsors/dmonad"
-  },
   "scripts": {
     "clean": "rm -rf dist",
     "test": "npm run lint && c8 node tests/node.js",
-    "dist": "rollup -c",
-    "build": "npm run clean && tsc && rollup -c",
+    "dist": "rollup -c && node scripts/gen-cts.js",
+    "build": "npm run clean && tsc && npm run dist",
     "prepare": "npm run build",
     "lint": "markdownlint README.md && standard && tsc",
     "preversion": "npm run clean && npm run lint && npm run dist",
     "debug": "concurrently 'rollup -wc' 'http-server -o .'"
   },
   "files": [
-    "dist/*",
-    "src/*"
+    "dist/y-idb.cjs",
+    "dist/y-idb.cjs.map",
+    "dist/y-idb.d.cts",
+    "dist/src",
+    "src"
   ],
   "exports": {
     ".": {
       "types": "./dist/src/y-idb.d.ts",
       "module": "./src/y-idb.js",
       "import": "./src/y-idb.js",
-      "require": "./dist/y-idb.cjs",
+      "require": {
+        "types": "./dist/y-idb.d.cts",
+        "default": "./dist/y-idb.cjs"
+      },
       "default": "./src/y-idb.js"
     },
     "./package.json": "./package.json"
@@ -63,7 +65,7 @@
   "bugs": {
     "url": "https://github.com/vrwarp/y-idb/issues"
   },
-  "homepage": "https://yjs.dev",
+  "homepage": "https://vrwarp.github.io/y-idb/",
   "dependencies": {
     "lib0": "^0.2.74"
   },

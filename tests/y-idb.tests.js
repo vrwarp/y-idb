@@ -3,6 +3,7 @@ import { IndexeddbPersistence, clearDocument, PREFERRED_TRIM_SIZE, fetchUpdates,
 import * as t from 'lib0/testing.js'
 import * as promise from 'lib0/promise.js'
 import * as prng from 'lib0/prng.js'
+import * as idb from 'lib0/indexeddb.js'
 import { runBasicExample } from '../examples/basic.js'
 import { runDebounceExample } from '../examples/debounce.js'
 import { runErrorHandlingExample } from '../examples/error-handling.js'
@@ -679,6 +680,309 @@ export const testRetryExhaustedEvent = async tc => {
 }
 
 /**
+ * Aborting a flush transaction while its add() requests are still pending
+ * must not produce unhandled promise rejections (the node test harness turns
+ * any unhandled rejection into a suite failure) and the updates must be
+ * recovered by the retry.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAbortedFlushDoesNotLeakRejections = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  let intercepted = false
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    const tx = originalTransaction.call(this, storeNames, mode, options)
+    if (!intercepted && storeNames.includes('updates') && mode === 'readwrite') {
+      intercepted = true
+      // Abort on a microtask: after _flush queued its add() requests
+      // synchronously, before any of them has executed.
+      queueMicrotask(() => {
+        try { tx.abort() } catch (e) {}
+      })
+    }
+    return tx
+  }
+
+  doc.getArray('t').insert(0, [1])
+  doc.getArray('t').insert(1, [2])
+  doc.getArray('t').insert(2, [3])
+
+  // Wait for the abort and the backoff retry against the restored db
+  await promise.wait(500)
+  t.assert(intercepted, 'flush transaction should have been intercepted')
+  t.assert(persistence._pendingUpdates.length === 0, 'updates should be flushed by the retry')
+
+  // Verify the data survived in a fresh instance
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1, 2, 3])
+
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
+ * One aborted transaction must be handled exactly once, even though the
+ * browser fires a bubbling 'error' event per pending request plus 'abort':
+ * one 'error' emission, one retry-count increment, one batch re-buffer —
+ * and after the retry succeeds the store must not contain duplicates.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAbortedFlushHandledOnce = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  // Let the constructor's initial-sync chain (and its trailing
+  // _scheduleFlush) fully settle so it cannot race with the failure below.
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  let intercepted = false
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    const tx = originalTransaction.call(this, storeNames, mode, options)
+    if (!intercepted && storeNames.includes('updates') && mode === 'readwrite') {
+      intercepted = true
+      // Abort while all three add() requests are still pending so that three
+      // bubbling request error events reach the transaction before 'abort'.
+      queueMicrotask(() => {
+        try { tx.abort() } catch (e) {}
+      })
+    }
+    return tx
+  }
+
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  doc.getArray('t').insert(0, [1])
+  doc.getArray('t').insert(1, [2])
+  doc.getArray('t').insert(2, [3])
+
+  // Inspect state after the abort but before the 200ms backoff retry
+  await promise.wait(50)
+  t.assert(intercepted, 'flush transaction should have been intercepted')
+  t.assert(errorEvents === 1, `one failure should emit one error event (got ${errorEvents})`)
+  t.assert(persistence._retryCount === 1, `one failure should count as one retry (got ${persistence._retryCount})`)
+  t.assert(persistence._pendingUpdates.length === 3, `batch should be re-buffered exactly once (got ${persistence._pendingUpdates.length})`)
+
+  // Let the retry flush against the working db, then check for duplicates
+  await promise.wait(500)
+  t.assert(persistence._pendingUpdates.length === 0, 'retry should have flushed the batch')
+  const [updatesStore] = idb.transact(db, ['updates'], 'readonly')
+  const cnt = await idb.count(updatesStore)
+  t.assert(cnt === 3, `store should hold exactly the 3 updates, no duplicates (got ${cnt})`)
+
+  await persistence.destroy()
+}
+
+/**
+ * If destroy() is called while a flush is in flight and that flush then
+ * fails, the failed batch is re-buffered into _pendingUpdates after destroy
+ * already snapshotted the queue. destroy must wait for the in-flight flush
+ * to settle and persist the re-buffered batch in its final write.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyPersistsFailedInflightFlush = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  /** @type {any} */
+  let flushTx = null
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    const tx = originalTransaction.call(this, storeNames, mode, options)
+    if (flushTx === null && storeNames.includes('updates') && mode === 'readwrite') {
+      flushTx = tx
+    }
+    return tx
+  }
+
+  doc.getArray('t').insert(0, [1])
+  // One microtask hop: the flush microtask queued by the insert runs first,
+  // so the transaction is created but its requests have not executed yet.
+  await Promise.resolve()
+  t.assert(persistence._writing, 'flush should be in flight')
+  const destroyPromise = persistence.destroy()
+  // Fail the in-flight flush after destroy snapshotted the pending queue
+  flushTx.abort()
+  await destroyPromise
+
+  // The update must have been persisted by destroy's final write
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1])
+  await persistence2.destroy()
+}
+
+/**
+ * A failure of the debounced trim (storeState) must surface through the
+ * 'error' event instead of an uncaught exception or unhandled rejection.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTrimFailureEmitsError = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  // Make the next flush completion schedule a trim in 100ms
+  persistence._storeTimeout = 100
+  persistence._dbsize = PREFERRED_TRIM_SIZE
+  doc.getArray('t').insert(0, [1])
+
+  // Let the flush complete, then break the database before the trim runs
+  await promise.wait(30)
+  t.assert(persistence._pendingUpdates.length === 0, 'flush should have completed')
+  t.assert(errorEvents === 0, 'no error before the trim runs')
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  db.transaction = () => {
+    throw new Error('Simulated trim failure')
+  }
+
+  await promise.wait(250)
+  t.assert(errorEvents === 1, `trim failure should emit one error event (got ${errorEvents})`)
+
+  db.transaction = originalTransaction
+  await persistence.destroy()
+}
+
+/**
+ * The debounced trim must fire even while writes keep coming in faster than
+ * the trim timeout — previously every flush completion reset the timer, so
+ * sustained writing postponed compaction indefinitely.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTrimRunsDuringSustainedWrites = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const arr = doc.getArray('t')
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  // Pretend the store is already over the trim threshold, then keep writing
+  // with gaps well below the 100ms trim timeout.
+  persistence._storeTimeout = 100
+  persistence._dbsize = PREFERRED_TRIM_SIZE
+  for (let i = 0; i < 12; i++) {
+    arr.insert(0, [i])
+    await promise.wait(30)
+  }
+
+  // storeState must have run within the write loop (~360ms > 100ms timeout),
+  // re-counting _dbsize down to the real number of stored records.
+  t.assert(persistence._dbsize < 100, `trim should have run during sustained writes (dbsize ${persistence._dbsize})`)
+  await persistence.destroy()
+}
+
+/**
+ * After a flush failure, new incoming updates must not trigger an immediate
+ * retry that bypasses the exponential backoff window.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testBackoffNotBypassedByNewUpdates = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  let txAttempts = 0
+  let failOnce = true
+  // @ts-ignore
+  db.transaction = function (storeNames, mode, options) {
+    if (storeNames.includes('updates') && mode === 'readwrite') {
+      txAttempts++
+      if (failOnce) {
+        failOnce = false
+        throw new Error('transient failure')
+      }
+    }
+    return originalTransaction.call(this, storeNames, mode, options)
+  }
+
+  // First update fails and arms a 200ms backoff timer
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(20)
+  t.assert(txAttempts === 1, 'first flush should have been attempted')
+
+  // A new update inside the backoff window must not flush immediately
+  doc.getArray('t').insert(1, [2])
+  await promise.wait(80) // now ~100ms after the failure, backoff is 200ms
+  t.assert(txAttempts === 1, `no retry before the backoff expires (got ${txAttempts} attempts)`)
+
+  // After the backoff, one retry writes both updates
+  await promise.wait(200)
+  t.assert(txAttempts === 2, `backoff retry should be the second attempt (got ${txAttempts})`)
+  t.assert(persistence._pendingUpdates.length === 0, 'retry should have flushed both updates')
+
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1, 2])
+
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testMaxRetriesOption = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { maxRetries: 0 })
+  t.assert(persistence._maxRetries === 0)
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  db.transaction = () => {
+    throw new Error('Persistent failure')
+  }
+
+  let retryExhausted = 0
+  persistence.on('retry-exhausted', () => { retryExhausted++ })
+
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(50)
+  t.assert(retryExhausted === 1, 'with maxRetries 0 the first failure should exhaust retries')
+
+  db.transaction = originalTransaction
+  await persistence.destroy()
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testTransactionRunner = async tc => {
@@ -739,6 +1043,106 @@ export const testTransactionRunner = async tc => {
   doc.getArray('t').insert(0, [2])
   await persistence.destroy()
   t.compareArrays(calls, ['start', 'end'], 'destroy flush should be wrapped in transactionRunner')
+}
+
+/**
+ * A transactionRunner whose returned promise rejects must not wedge the
+ * provider: the batch is re-buffered, 'error' is emitted, a later flush
+ * persists everything, and destroy() still resolves.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTransactionRunnerFailureRecovery = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+
+  let failNext = false
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async work => {
+    if (failNext) {
+      failNext = false
+      throw new Error('runner transient failure')
+    }
+    return work()
+  }
+
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { transactionRunner: runner })
+  await persistence.whenSynced
+  await promise.wait(50)
+
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  failNext = true
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(50)
+  t.assert(errorEvents === 1, 'runner failure should emit an error event')
+  t.assert(!persistence._writing, '_writing must not stay stuck after a runner failure')
+  t.assert(persistence._pendingUpdates.length === 1, 'failed batch should be re-buffered')
+
+  // The backoff retry (200ms) flushes against the now-healthy runner
+  await promise.wait(300)
+  t.assert(persistence._pendingUpdates.length === 0, 'retry should have flushed the batch')
+
+  const destroyOutcome = await persistence.destroy().then(() => 'resolved', () => 'rejected')
+  t.assert(destroyOutcome === 'resolved', 'destroy must resolve after a recovered runner failure')
+
+  // Verify the update was persisted
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1])
+  await persistence2.destroy()
+}
+
+/**
+ * A failure during the initial sync (e.g. a failing transactionRunner) must
+ * surface through the 'error' event instead of an unhandled rejection, and
+ * updates must still be persisted through the open connection.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testInitialSyncFailureEmitsError = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+
+  let failNext = true
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async work => {
+    if (failNext) {
+      failNext = false
+      throw new Error('initial sync failure')
+    }
+    return work()
+  }
+
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { transactionRunner: runner })
+  let errorEvents = 0
+  persistence.on('error', () => { errorEvents++ })
+
+  await promise.wait(100)
+  t.assert(errorEvents === 1, 'initial sync failure should emit an error event')
+  t.assert(!persistence.synced, 'provider must not claim to be synced')
+
+  // Updates made after the failed sync are still written
+  doc.getArray('t').insert(0, [1])
+  await promise.wait(100)
+
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compareArrays(doc2.getArray('t').toArray(), [1])
+
+  await persistence.destroy()
+  await persistence2.destroy()
 }
 
 /**

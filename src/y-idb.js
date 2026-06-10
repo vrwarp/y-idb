@@ -38,13 +38,7 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
     })
   }
   const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName], 'readwrite')
-  /**
-   * @type {Array<Uint8Array>}
-   */
-  const updates = []
-  return idb.iterate(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false), (val) => {
-    updates.push(val)
-  }).then(() => {
+  return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false)).then(updates => {
     if (idbPersistence._destroyed) return
     if (beforeApplyUpdatesCallback) beforeApplyUpdatesCallback(updatesStore)
     Y.transact(idbPersistence.doc, () => {
@@ -120,8 +114,10 @@ export class IndexeddbPersistence extends Observable {
    * @param {number} [opts.writeDebounceMs]
    * @param {'default'|'relaxed'} [opts.durability]
    * @param {<T>(work: () => Promise<T>) => Promise<T>} [opts.transactionRunner]
+   * @param {number} [opts.maxRetries] Number of times a failed write is
+   * retried with exponential backoff before 'retry-exhausted' is emitted.
    */
-  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner } = {}) {
+  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner, maxRetries = 5 } = {}) {
     super()
     this.doc = doc
     this.name = name
@@ -132,7 +128,13 @@ export class IndexeddbPersistence extends Observable {
     this.durability = durability
     this.transactionRunner = transactionRunner
     this._retryCount = 0
-    this._maxRetries = 5
+    this._maxRetries = maxRetries
+    /**
+     * Pending backoff timer after a failed flush. While it is armed, flush
+     * scheduling is deferred to it so the backoff cannot be bypassed.
+     * @type {any}
+     */
+    this._retryTimeoutId = null
     /**
      * @type {Promise<any>|null}
      */
@@ -171,7 +173,10 @@ export class IndexeddbPersistence extends Observable {
       const beforeApplyUpdatesCallback = (updatesStore) => {
         const initUpdate = Y.encodeStateAsUpdate(doc)
         if (initUpdate.length > 2) {
-          return idb.addAutoKey(updatesStore, initUpdate)
+          // Use the raw request instead of the lib0 promise wrapper: the
+          // promise would be discarded, so a transaction failure would
+          // surface as an unhandled rejection instead of the tx error event.
+          updatesStore.add(initUpdate)
         }
       }
       const afterApplyUpdatesCallback = () => {
@@ -180,6 +185,15 @@ export class IndexeddbPersistence extends Observable {
         this.emit('synced', [this])
       }
       fetchUpdates(this, beforeApplyUpdatesCallback, afterApplyUpdatesCallback).then(() => {
+        this._scheduleFlush()
+      }, err => {
+        // Initial sync failed (corrupt database, failing transactionRunner,
+        // ...). Surface it instead of leaving an unhandled rejection, and
+        // still start flushing: the connection itself is open, so buffered
+        // updates can be persisted.
+        if (!this._destroyed) {
+          this.emit('error', [err])
+        }
         this._scheduleFlush()
       })
     })
@@ -212,9 +226,12 @@ export class IndexeddbPersistence extends Observable {
           const tx = this.db.transaction([updatesStoreName], 'readwrite')
           const store = tx.objectStore(updatesStoreName)
           for (let i = 0; i < batch.length; i++) {
-            idb.addAutoKey(store, batch[i])
+            store.add(batch[i])
           }
+          let handled = false
           tx.onerror = tx.onabort = () => {
+            if (handled) return
+            handled = true
             if (!this._destroyed) {
               this._pendingUpdates = batch.concat(this._pendingUpdates)
             }
@@ -241,6 +258,9 @@ export class IndexeddbPersistence extends Observable {
 
   _scheduleFlush () {
     if (this._destroyed || this._writing || this._pendingUpdates.length === 0) return
+    // A failed flush armed a backoff timer that will reschedule; flushing
+    // now (e.g. because a new update arrived) would bypass the backoff.
+    if (this._retryTimeoutId !== null) return
     if (this._flushScheduled) return
     this._flushScheduled = true
     if (this.writeDebounceMs > 0) {
@@ -253,6 +273,33 @@ export class IndexeddbPersistence extends Observable {
         this._flushScheduled = false
         this._flush()
       })
+    }
+  }
+
+  /**
+   * Recover from a failed flush attempt: re-buffer the batch, surface the
+   * error, and schedule a retry with exponential backoff.
+   *
+   * @param {Array<Uint8Array>} batch
+   * @param {any} err
+   */
+  _onFlushFailed (batch, err) {
+    this._pendingUpdates = batch.concat(this._pendingUpdates)
+    this._writing = false
+    this._flushPromise = null
+    this.emit('error', [err])
+    if (!this._destroyed) {
+      this._retryCount++
+      if (this._retryCount <= this._maxRetries) {
+        const backoff = Math.pow(2, this._retryCount) * 100
+        this._retryTimeoutId = setTimeout(() => {
+          this._retryTimeoutId = null
+          this._scheduleFlush()
+        }, backoff)
+      } else {
+        this._retryCount = 0
+        this.emit('retry-exhausted', [err || new Error('Retry exhausted')])
+      }
     }
   }
 
@@ -269,6 +316,10 @@ export class IndexeddbPersistence extends Observable {
     this._writing = true
     const batch = this._pendingUpdates
     this._pendingUpdates = []
+    // Tracks whether the flush work below ran to a conclusion. If the
+    // transactionRunner rejects without it, recovery happens in the chained
+    // rejection handler instead.
+    let settled = false
     this._flushPromise = transactWrite(this, () => new Promise(resolve => {
       /**
        * @type {IDBTransaction}
@@ -277,18 +328,17 @@ export class IndexeddbPersistence extends Observable {
       try {
         tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
       } catch (e) {
-        this._pendingUpdates = batch.concat(this._pendingUpdates)
-        this._writing = false
-        this._flushPromise = null
-        this.emit('error', [e])
+        settled = true
+        this._onFlushFailed(batch, e)
         resolve(undefined)
         return
       }
       const store = tx.objectStore(updatesStoreName)
       for (let i = 0; i < batch.length; i++) {
-        idb.addAutoKey(store, batch[i])
+        store.add(batch[i])
       }
       tx.oncomplete = () => {
+        settled = true
         this._retryCount = 0
         this._dbsize += batch.length
         this._writing = false
@@ -296,47 +346,63 @@ export class IndexeddbPersistence extends Observable {
         if (this._pendingUpdates.length > 0) {
           this._scheduleFlush()
         }
-        if (this._dbsize >= PREFERRED_TRIM_SIZE) {
-          if (this._storeTimeoutId !== null) {
-            clearTimeout(this._storeTimeoutId)
-          }
+        // Schedule a compaction if none is pending yet. Don't reset a
+        // pending timer: under sustained writes that would postpone the trim
+        // indefinitely and let the store grow without bound.
+        if (!this._destroyed && this._dbsize >= PREFERRED_TRIM_SIZE && this._storeTimeoutId === null) {
           this._storeTimeoutId = setTimeout(() => {
-            storeState(this, false)
             this._storeTimeoutId = null
+            // storeState can fail synchronously (transact on a closing db
+            // throws) or asynchronously — surface both via 'error' instead
+            // of an uncaught exception / unhandled rejection.
+            try {
+              storeState(this, false).catch(err => {
+                if (!this._destroyed) {
+                  this.emit('error', [err])
+                }
+              })
+            } catch (err) {
+              if (!this._destroyed) {
+                this.emit('error', [err])
+              }
+            }
           }, this._storeTimeout)
         }
         resolve(undefined)
       }
+      // A failed transaction fires a bubbling 'error' event for every pending
+      // request and then 'abort' — guard so one failure is handled once.
+      let handled = false
       const onErrorOrAbort = () => {
-        this._pendingUpdates = batch.concat(this._pendingUpdates)
-        this._writing = false
-        this._flushPromise = null
-        this.emit('error', [tx.error])
-        if (!this._destroyed) {
-          this._retryCount++
-          if (this._retryCount <= this._maxRetries) {
-            const backoff = Math.pow(2, this._retryCount) * 100
-            setTimeout(() => {
-              this._scheduleFlush()
-            }, backoff)
-          } else {
-            this._retryCount = 0
-            this.emit('retry-exhausted', [tx.error || new Error('Retry exhausted')])
-          }
-        }
+        if (handled) return
+        handled = true
+        settled = true
+        this._onFlushFailed(batch, tx.error)
         resolve(undefined)
       }
       tx.onerror = onErrorOrAbort
       tx.onabort = onErrorOrAbort
-    }))
+    })).then(() => {}, err => {
+      // The transactionRunner itself failed. Without this, _writing would
+      // stay true forever and every future update would silently pile up in
+      // _pendingUpdates without ever being written.
+      if (!settled) {
+        this._onFlushFailed(batch, err)
+      }
+    })
   }
 
   destroy () {
     if (this._destroyPromise) {
       return this._destroyPromise
     }
-    if (this._storeTimeoutId) {
+    if (this._storeTimeoutId !== null) {
       clearTimeout(this._storeTimeoutId)
+      this._storeTimeoutId = null
+    }
+    if (this._retryTimeoutId !== null) {
+      clearTimeout(this._retryTimeoutId)
+      this._retryTimeoutId = null
     }
     this.doc.off('update', this._storeUpdate)
     this.doc.off('destroy', this.destroy)
@@ -348,30 +414,47 @@ export class IndexeddbPersistence extends Observable {
       document.removeEventListener('visibilitychange', this._visibilityListener)
     }
 
-    const db = this.db
-    let flushPromise = Promise.resolve()
-    if (db && this._pendingUpdates.length > 0) {
-      const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
-      flushPromise = transactWrite(this, () => new Promise((resolve) => {
-        try {
-          const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
-          const store = tx.objectStore(updatesStoreName)
-          for (let i = 0; i < batch.length; i++) {
-            idb.addAutoKey(store, batch[i])
-          }
-          tx.oncomplete = () => resolve(undefined)
-          tx.onerror = tx.onabort = () => resolve(undefined)
-        } catch (e) {
-          resolve(undefined)
+    // Wait for an in-flight flush to settle before writing the remaining
+    // pending updates: if that flush fails it re-buffers its batch into
+    // _pendingUpdates, so snapshotting the queue only afterwards guarantees
+    // the failed batch is included in the final write instead of lost.
+    const activeFlushPromise = (this._flushPromise || Promise.resolve()).then(() => {}, () => {})
+    this._destroyPromise = activeFlushPromise
+      .then(() => {
+        const db = this.db
+        if (db && this._pendingUpdates.length > 0) {
+          const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
+          return transactWrite(this, () => new Promise((resolve) => {
+            try {
+              const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
+              const store = tx.objectStore(updatesStoreName)
+              for (let i = 0; i < batch.length; i++) {
+                store.add(batch[i])
+              }
+              tx.oncomplete = () => resolve(undefined)
+              let handled = false
+              tx.onerror = tx.onabort = () => {
+                if (!handled) {
+                  handled = true
+                  this.emit('error', [tx.error])
+                }
+                resolve(undefined)
+              }
+            } catch (e) {
+              this.emit('error', [e])
+              resolve(undefined)
+            }
+          })).catch(err => {
+            // transactionRunner failure during the final flush — nothing
+            // more can be done at teardown beyond surfacing it.
+            this.emit('error', [err])
+          })
         }
-      }))
-    }
-
-    const activeFlushPromise = this._flushPromise || Promise.resolve()
-
-    this._destroyPromise = Promise.all([flushPromise, activeFlushPromise]).then(() => this._db.then(db => {
-      db.close()
-    }))
+      })
+      .then(() => this._db.then(db => { db.close() }, () => {}))
+      .then(() => {
+        super.destroy()
+      })
     return this._destroyPromise
   }
 

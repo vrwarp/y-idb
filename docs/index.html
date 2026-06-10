@@ -438,7 +438,7 @@
         
         <h2>Key Benefits</h2>
         <ul style="margin-left: 20px; color: var(--text-muted); font-size: 15px; display: flex; flex-direction: column; gap: 8px;">
-          <li><strong>Bounded Concurrency:</strong> Restricts writes to at most 1 in-flight transaction, completely eliminating IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers).</li>
+          <li><strong>Bounded Concurrency:</strong> The update flusher keeps at most 1 in-flight flush transaction, greatly reducing IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers). Other operations (<code>set</code>/<code>del</code>, compaction, the page-hide flush, the final flush in <code>destroy()</code>) open their own transactions; a custom <code>transactionRunner</code> can serialize all writes.</li>
           <li><strong>Microtask Batching:</strong> Automatically bundles synchronous or high-frequency updates into a single write transaction with sub-millisecond latency.</li>
           <li><strong>Durability Safeguards:</strong> Best-effort flush listeners queue and persist memory updates on page hide, document destruction, and tab close.</li>
           <li><strong>Error Handling:</strong> Propagates database transaction errors (such as <code>QuotaExceededError</code>) through an Observable event emitter, preventing silent data drops.</li>
@@ -466,8 +466,13 @@ provider.on('synced', () => {
         <h2>API Reference</h2>
         
         <div class="api-entry">
-          <div class="api-sig">new IndexeddbPersistence(docName: string, ydoc: Y.Doc, options?: { writeDebounceMs?: number })</div>
-          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask).</p>
+          <div class="api-sig">new IndexeddbPersistence(docName: string, ydoc: Y.Doc, options?: { writeDebounceMs?: number, durability?: 'default' | 'relaxed', transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;, maxRetries?: number })</div>
+          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask). <code>durability</code> (default <code>'default'</code>) is passed to IndexedDB transactions; <code>'relaxed'</code> can significantly improve write throughput. <code>transactionRunner</code> wraps every internal write transaction, e.g. to serialize writes across databases with a global lock. <code>maxRetries</code> (default <code>5</code>) caps the exponential-backoff retries of failed writes.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.whenSynced: Promise&lt;IndexeddbPersistence&gt;</div>
+          <p>Resolves once the initial content has been loaded from the database. If the provider is destroyed before the initial sync completes, the promise never settles.</p>
         </div>
 
         <div class="api-entry">
@@ -477,12 +482,22 @@ provider.on('synced', () => {
 
         <div class="api-entry">
           <div class="api-sig">provider.on('error', (err: Error) => void)</div>
-          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with a 500ms backoff.</p>
+          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.on('retry-exhausted', (err: Error) => void)</div>
+          <p>Emitted when a failed write has been retried <code>maxRetries</code> times without success. The updates stay buffered in memory; the next document update triggers a fresh write attempt.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">provider.set(key, value): Promise / provider.get(key): Promise / provider.del(key): Promise</div>
+          <p>Store, retrieve, and delete custom metadata in a separate object store of the same database. This data is persisted locally but never synced to other peers.</p>
         </div>
 
         <div class="api-entry">
           <div class="api-sig">provider.destroy(): Promise&lt;void&gt;</div>
-          <p>Flushes all pending buffer updates to IndexedDB and closes the database connection.</p>
+          <p>Waits for any in-flight write to settle, performs a best-effort flush of all remaining buffered updates, and closes the database connection. Always resolves; a failure of the final write is reported through the <code>error</code> event.</p>
         </div>
 
         <div class="api-entry">
@@ -500,7 +515,7 @@ provider.on('synced', () => {
         <span class="badge badge-live">Interactive</span>
       </div>
       
-      <p>Simulate document edits under different load configurations to see how the single-in-flight batched writer behaves visually.</p>
+      <p>Simulate document edits under different load configurations to see how the single-in-flight batched writer behaves visually. (Not shown: once the store exceeds 500 rows, the real provider compacts it about a second later by merging all rows into a single document snapshot.)</p>
 
       <div class="sim-controls">
         <div class="form-group">
@@ -566,6 +581,8 @@ provider.on('synced', () => {
     let flushScheduled = false;
     let dbRows = 0;
     let updateIdCounter = 1;
+    let retryCount = 0;
+    const maxRetries = 5;
 
     const debounceInput = document.getElementById('debounce');
     const errCheck = document.getElementById('err-check');
@@ -665,17 +682,27 @@ provider.on('synced', () => {
           pipelineStatus.textContent = 'Transaction Aborted';
 
           log(`Transaction Error (QuotaExceededError): Aborted transaction. Emitting 'error' event.`, 'error');
-          log(`Failed batch prepended back to memory buffer. Applying 500ms retry backoff.`, 'error');
-          
           updateUI();
 
-          setTimeout(() => {
+          retryCount++;
+          if (retryCount <= maxRetries) {
+            const backoff = Math.pow(2, retryCount) * 100;
+            log(`Failed batch prepended back to memory buffer. Retry ${retryCount}/${maxRetries} in ${backoff}ms (exponential backoff).`, 'error');
+            setTimeout(() => {
+              pipelineBox.classList.remove('stage-box-error');
+              pipelineStatus.className = 'status-idle';
+              pipelineStatus.textContent = 'Idle';
+              scheduleFlush();
+            }, backoff);
+          } else {
+            retryCount = 0;
+            log(`Retry limit exceeded. Emitting 'retry-exhausted' event. Updates stay buffered until the next document update.`, 'error');
             pipelineBox.classList.remove('stage-box-error');
             pipelineStatus.className = 'status-idle';
             pipelineStatus.textContent = 'Idle';
-            scheduleFlush();
-          }, 500);
+          }
         } else {
+          retryCount = 0;
           dbRows += batch.length;
           writing = false;
           pipelineBox.innerHTML = '';
