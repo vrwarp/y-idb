@@ -112,6 +112,15 @@ Retrieve a stored value.
   <dd>
 Delete a stored value.
   </dd>
+  <dt><b><code>provider.flush(): Promise&lt;void&gt;</code></b></dt>
+  <dd>
+Force-drain the buffered update queue immediately, bypassing the
+<code>writeDebounceMs</code> timer. Resolves once every pending update
+(including any that arrive while a write is in flight) has been committed, or
+immediately when the queue is idle. While a write keeps failing it waits for
+the scheduled backoff retry rather than hot-spinning, so callers that need a
+time bound should race it against a deadline.
+  </dd>
   <dt><b><code>provider.destroy(): Promise</code></b></dt>
   <dd>
 Close the connection to the database and stop syncing the document. This method is
@@ -121,6 +130,37 @@ automatically called when the Yjs document is destroyed (e.g. ydoc.destroy()).
   <dd>
 Destroy this database and remove the stored document and all related meta-information
 from the database.
+  </dd>
+  <dt><b><code>writeSnapshot(<br/>
+    name: string,<br/>
+    update: Uint8Array,<br/>
+    options?: {<br/>
+      transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;<br/>
+    }<br/>
+  ): Promise&lt;void&gt;</code></b></dt>
+  <dd>
+Module-level helper that writes <code>update</code> as the complete content of
+database <code>name</code> (clearing any prior update rows) using this module's
+own store layout, and resolves only after the transaction has committed — a
+reload immediately afterwards cannot lose the snapshot. No live
+<code>IndexeddbPersistence</code> may be bound to <code>name</code> while this
+runs. The optional <code>transactionRunner</code> wraps the whole
+open→commit→close unit.
+  </dd>
+  <dt><b><code>readSnapshot(<br/>
+    name: string,<br/>
+    options?: {<br/>
+      transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;<br/>
+    }<br/>
+  ): Promise&lt;Uint8Array | null&gt;</code></b></dt>
+  <dd>
+Module-level helper that reads the complete persisted state of database
+<code>name</code> as one merged Yjs update, without constructing an
+<code>IndexeddbPersistence</code> binding. Resolves <code>null</code> when the
+database holds no updates (a missing database included); multiple rows are
+merged with <code>Y.mergeUpdates</code>, so the result always hydrates a fresh
+doc to the full persisted state. The optional <code>transactionRunner</code>
+wraps the whole open→read→close unit.
   </dd>
 </dl>
 

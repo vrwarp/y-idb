@@ -1,5 +1,7 @@
+/* eslint-env browser */
+
 import * as Y from 'yjs'
-import { IndexeddbPersistence, clearDocument, PREFERRED_TRIM_SIZE, fetchUpdates, storeState } from '../src/y-idb.js'
+import { IndexeddbPersistence, clearDocument, PREFERRED_TRIM_SIZE, fetchUpdates, storeState, readSnapshot, writeSnapshot } from '../src/y-idb.js'
 import * as t from 'lib0/testing.js'
 import * as promise from 'lib0/promise.js'
 import * as prng from 'lib0/prng.js'
@@ -1197,4 +1199,426 @@ export const testTransactionRunnerSerialization = async tc => {
   t.compareArrays(executionOrder, ['start', 'end', 'start', 'end'])
 
   await persistence.destroy()
+}
+
+/**
+ * Open `name` read-only WITHOUT creating stores, so assertions observe
+ * exactly what the code under test persisted (not a layout we forced).
+ *
+ * @param {string} name
+ * @return {Promise<IDBDatabase>}
+ */
+const openRaw = name => new Promise((resolve, reject) => {
+  const request = indexedDB.open(name)
+  request.onsuccess = () => resolve(request.result)
+  request.onerror = () => reject(request.error)
+})
+
+/**
+ * Read the raw `updates` rows of database `name` through an independent
+ * connection (i.e. not via the provider under test).
+ *
+ * @param {string} name
+ * @return {Promise<Array<Uint8Array>>}
+ */
+const readUpdateRows = async name => {
+  const db = await openRaw(name)
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(['updates'], 'readonly')
+      const request = tx.objectStore('updates').getAll()
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * flush() is an immediate no-op when the queue is idle.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFlushIdleNoop = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { writeDebounceMs: 60000 })
+  await persistence.whenSynced
+
+  const rowsBefore = (await readUpdateRows(tc.testName)).length
+  await persistence.flush()
+  const rowsAfter = (await readUpdateRows(tc.testName)).length
+
+  t.assert(rowsAfter === rowsBefore, 'flush() must not write when idle')
+  t.assert(persistence._pendingUpdates.length === 0)
+  t.assert(persistence._writing === false)
+  await persistence.destroy()
+}
+
+/**
+ * flush() drains pending updates durably without waiting out the debounce.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFlushDrainsPending = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  // Debounce far beyond the test horizon: only flush() can drain this.
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { writeDebounceMs: 60000 })
+  await persistence.whenSynced
+
+  doc.getMap('m').set('pending', 'flushed')
+  t.assert(persistence._pendingUpdates.length === 1)
+
+  await persistence.flush()
+  t.assert(persistence._pendingUpdates.length === 0)
+  t.assert(persistence._writing === false)
+
+  // Durable: visible to a raw read AND hydrates a fresh provider.
+  t.assert((await readUpdateRows(tc.testName)).length > 0)
+  await persistence.destroy()
+
+  const docB = new Y.Doc()
+  const persistenceB = new IndexeddbPersistence(tc.testName, docB)
+  await persistenceB.whenSynced
+  t.assert(docB.getMap('m').get('pending') === 'flushed')
+  await persistenceB.destroy()
+}
+
+/**
+ * flush() chains over an in-flight write and updates that arrive mid-flush.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFlushChainsInFlight = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { writeDebounceMs: 60000 })
+  await persistence.whenSynced
+
+  doc.getMap('m').set('first', 1)
+  const flushed = persistence.flush()
+  // Arrives while the first batch may already be in flight — flush() must
+  // not resolve until this lands too.
+  doc.getMap('m').set('second', 2)
+  await flushed
+
+  t.assert(persistence._pendingUpdates.length === 0)
+  t.assert(persistence._writing === false)
+
+  await persistence.destroy()
+  const docB = new Y.Doc()
+  const persistenceB = new IndexeddbPersistence(tc.testName, docB)
+  await persistenceB.whenSynced
+  t.assert(docB.getMap('m').get('first') === 1)
+  t.assert(docB.getMap('m').get('second') === 2)
+  await persistenceB.destroy()
+}
+
+/**
+ * flush() waits for the armed backoff retry instead of bypassing it, and
+ * resolves once the write finally succeeds. (Pins the y-idb adaptation of the
+ * surgery: flush() gates on `_retryTimeoutId`, the y-idb retry mechanism.)
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFlushWaitsForRetryBackoff = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { writeDebounceMs: 60000 })
+  await persistence.whenSynced
+
+  const db = /** @type {IDBDatabase} */ (persistence.db)
+  const originalTransaction = db.transaction
+  db.transaction = () => { throw new Error('Simulated write failure') }
+
+  let errorCount = 0
+  persistence.on('error', () => { errorCount++ })
+
+  doc.getMap('m').set('k', 'v')
+  // Kick a flush; the underlying write fails and arms a backoff retry.
+  const flushed = persistence.flush()
+  await promise.wait(50)
+  t.assert(errorCount > 0, 'the failing write must surface an error')
+  t.assert(persistence._retryTimeoutId !== null, 'a backoff retry must be armed')
+  t.assert(persistence._pendingUpdates.length === 1, 'the failed batch is re-buffered')
+
+  // Recover: the next scheduled retry now succeeds, so flush() resolves.
+  db.transaction = originalTransaction
+  await flushed
+  t.assert(persistence._pendingUpdates.length === 0)
+  t.assert(persistence._writing === false)
+  t.assert((await readUpdateRows(tc.testName)).length > 0)
+  await persistence.destroy()
+}
+
+/**
+ * writeSnapshot() writes one row, in this module's layout, that hydrates a
+ * fresh provider byte-identically.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testWriteSnapshotHydrates = async tc => {
+  await clearDocument(tc.testName)
+
+  const source = new Y.Doc()
+  source.getMap('library').set('book-1', { title: 'Snapshot Book' })
+  source.getMap('annotations').set('ann-1', 'note')
+  const update = Y.encodeStateAsUpdate(source)
+
+  await writeSnapshot(tc.testName, update)
+
+  // The fork's own store layout, exactly one row, byte-identical.
+  const db = await openRaw(tc.testName)
+  t.compareArrays(Array.from(db.objectStoreNames).sort(), ['custom', 'updates'])
+  db.close()
+  const rows = await readUpdateRows(tc.testName)
+  t.assert(rows.length === 1)
+  t.compareArrays(Array.from(rows[0]), Array.from(update))
+
+  // A real provider session hydrates to the identical doc state.
+  const docB = new Y.Doc()
+  const persistenceB = new IndexeddbPersistence(tc.testName, docB)
+  await persistenceB.whenSynced
+  t.compare(docB.getMap('library').toJSON(), source.toJSON().library)
+  t.compare(docB.getMap('annotations').toJSON(), source.toJSON().annotations)
+  source.destroy()
+  await persistenceB.destroy()
+}
+
+/**
+ * writeSnapshot() clears prior update rows (idempotent replacement).
+ *
+ * @param {t.TestCase} tc
+ */
+export const testWriteSnapshotClearsPrior = async tc => {
+  await clearDocument(tc.testName)
+
+  // Populate the database through a normal provider session first.
+  const docA = new Y.Doc()
+  const persistenceA = new IndexeddbPersistence(tc.testName, docA)
+  await persistenceA.whenSynced
+  docA.getMap('m').set('old', 'state')
+  await persistenceA.destroy()
+  t.assert((await readUpdateRows(tc.testName)).length > 0)
+
+  const replacement = new Y.Doc()
+  replacement.getMap('m').set('new', 'state')
+  const update = Y.encodeStateAsUpdate(replacement)
+  await writeSnapshot(tc.testName, update)
+
+  const rows = await readUpdateRows(tc.testName)
+  t.assert(rows.length === 1)
+  t.compareArrays(Array.from(rows[0]), Array.from(update))
+
+  const docB = new Y.Doc()
+  const persistenceB = new IndexeddbPersistence(tc.testName, docB)
+  await persistenceB.whenSynced
+  t.compare(docB.getMap('m').toJSON(), { new: 'state' })
+  replacement.destroy()
+  await persistenceB.destroy()
+}
+
+/**
+ * writeSnapshot() routes the whole write through the injected
+ * transactionRunner.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testWriteSnapshotUsesRunner = async tc => {
+  await clearDocument(tc.testName)
+  let runnerCalls = 0
+  let workSettledInsideRunner = false
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async (work) => {
+    runnerCalls++
+    const result = await work()
+    workSettledInsideRunner = true
+    return result
+  }
+
+  const source = new Y.Doc()
+  source.getMap('m').set('via', 'runner')
+  await writeSnapshot(tc.testName, Y.encodeStateAsUpdate(source), { transactionRunner: runner })
+  source.destroy()
+
+  t.assert(runnerCalls === 1)
+  t.assert(workSettledInsideRunner, 'work settled inside the runner')
+  t.assert((await readUpdateRows(tc.testName)).length === 1)
+}
+
+/**
+ * 'synced' is not emitted before the constructor's hydration transaction
+ * (which carries the initial-state write) has COMMITTED.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testSyncedAfterCommit = async tc => {
+  await clearDocument(tc.testName)
+
+  // Track commit state of every readwrite transaction opened on this
+  // database. The 'complete' listener is attached at creation time, so it
+  // runs before any oncomplete handler the implementation assigns later.
+  /** @type {Array<{ committed: boolean }>} */
+  const pending = []
+  const realTransaction = IDBDatabase.prototype.transaction
+  // @ts-ignore - override the prototype to observe every transaction's commit
+  IDBDatabase.prototype.transaction = function (storeNames, mode, options) {
+    const tx = realTransaction.call(this, storeNames, mode, options)
+    if (this.name === tc.testName && tx.mode === 'readwrite') {
+      const record = { committed: false }
+      tx.addEventListener('complete', () => { record.committed = true })
+      pending.push(record)
+    }
+    return tx
+  }
+
+  try {
+    // A doc with content: the constructor must write the initial state.
+    const doc = new Y.Doc()
+    doc.getMap('m').set('initial', 'state')
+    const persistence = new IndexeddbPersistence(tc.testName, doc)
+    await persistence.whenSynced
+
+    // The hydration transaction (carrying the initial-state write) has
+    // committed by the time whenSynced resolves…
+    t.assert(pending.length > 0)
+    pending.forEach(record => t.assert(record.committed === true, 'hydration tx must commit before synced'))
+
+    // …so the initial write is durably visible to an independent read.
+    const rows = await readUpdateRows(tc.testName)
+    t.assert(rows.length > 0)
+    const fresh = new Y.Doc()
+    rows.forEach(row => Y.applyUpdate(fresh, row))
+    t.assert(fresh.getMap('m').get('initial') === 'state')
+    fresh.destroy()
+    await persistence.destroy()
+  } finally {
+    IDBDatabase.prototype.transaction = realTransaction
+  }
+}
+
+/**
+ * synced ordering is preserved: stored updates are applied before the
+ * durable emit.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testSyncedOrderingPreserved = async tc => {
+  await clearDocument(tc.testName)
+
+  const docA = new Y.Doc()
+  const persistenceA = new IndexeddbPersistence(tc.testName, docA)
+  await persistenceA.whenSynced
+  docA.getMap('m').set('stored', 'yes')
+  await persistenceA.destroy()
+
+  const docB = new Y.Doc()
+  const persistenceB = new IndexeddbPersistence(tc.testName, docB)
+  /** @type {unknown} */
+  let contentAtEmit
+  persistenceB.on('synced', () => {
+    contentAtEmit = docB.getMap('m').get('stored')
+  })
+  await persistenceB.whenSynced
+  t.assert(contentAtEmit === 'yes')
+  await persistenceB.destroy()
+}
+
+/**
+ * readSnapshot() resolves null for a missing or empty database.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testReadSnapshotNullWhenEmpty = async tc => {
+  await clearDocument(tc.testName)
+  // Missing database: opening creates an empty one — still null.
+  t.assert((await readSnapshot(tc.testName)) === null)
+  // Still null on the now-existing-but-empty database.
+  t.assert((await readSnapshot(tc.testName)) === null)
+}
+
+/**
+ * readSnapshot() round-trips writeSnapshot byte-identically.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testReadSnapshotRoundTrip = async tc => {
+  await clearDocument(tc.testName)
+  const source = new Y.Doc()
+  source.getMap('library').set('book-1', { title: 'Round Trip' })
+  const update = Y.encodeStateAsUpdate(source)
+  source.destroy()
+
+  await writeSnapshot(tc.testName, update)
+  const read = await readSnapshot(tc.testName)
+  t.assert(read !== null)
+  t.compareArrays(Array.from(/** @type {Uint8Array} */ (read)), Array.from(update))
+}
+
+/**
+ * readSnapshot() merges multiple update rows into the full persisted state.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testReadSnapshotMergesRows = async tc => {
+  await clearDocument(tc.testName)
+
+  // A normal provider session leaves a snapshot row plus debounced
+  // incremental rows — exactly what a staged database can hold.
+  const docA = new Y.Doc()
+  const persistenceA = new IndexeddbPersistence(tc.testName, docA, { writeDebounceMs: 1 })
+  await persistenceA.whenSynced
+  docA.getMap('m').set('first', 1)
+  await persistenceA.flush()
+  docA.getMap('m').set('second', 2)
+  await persistenceA.flush()
+  await persistenceA.destroy()
+  t.assert((await readUpdateRows(tc.testName)).length > 1)
+
+  const read = await readSnapshot(tc.testName)
+  t.assert(read !== null)
+  const fresh = new Y.Doc()
+  Y.applyUpdate(fresh, /** @type {Uint8Array} */ (read))
+  t.assert(fresh.getMap('m').get('first') === 1)
+  t.assert(fresh.getMap('m').get('second') === 2)
+  fresh.destroy()
+}
+
+/**
+ * readSnapshot() routes the whole read through the injected
+ * transactionRunner.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testReadSnapshotUsesRunner = async tc => {
+  await clearDocument(tc.testName)
+  const source = new Y.Doc()
+  source.getMap('m').set('via', 'runner')
+  await writeSnapshot(tc.testName, Y.encodeStateAsUpdate(source))
+  source.destroy()
+
+  let runnerCalls = 0
+  let workSettledInsideRunner = false
+  /**
+   * @template T
+   * @param {() => Promise<T>} work
+   * @return {Promise<T>}
+   */
+  const runner = async (work) => {
+    runnerCalls++
+    const result = await work()
+    workSettledInsideRunner = true
+    return result
+  }
+
+  const read = await readSnapshot(tc.testName, { transactionRunner: runner })
+  t.assert(runnerCalls === 1)
+  t.assert(workSettledInsideRunner, 'work settled inside the runner')
+  t.assert(read !== null)
 }
