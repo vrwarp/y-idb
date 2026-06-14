@@ -496,6 +496,11 @@ provider.on('synced', () => {
         </div>
 
         <div class="api-entry">
+          <div class="api-sig">provider.flush(): Promise&lt;void&gt;</div>
+          <p>Force-drains the buffered update queue immediately, bypassing the <code>writeDebounceMs</code> timer, and resolves once every pending update (including any that arrive while a write is in flight) has been committed. Resolves immediately when the queue is idle. While a write keeps failing it waits for the scheduled backoff retry rather than hot-spinning, so a caller that needs a time bound should race it against a deadline.</p>
+        </div>
+
+        <div class="api-entry">
           <div class="api-sig">provider.destroy(): Promise&lt;void&gt;</div>
           <p>Waits for any in-flight write to settle, performs a best-effort flush of all remaining buffered updates, and closes the database connection. Always resolves; a failure of the final write is reported through the <code>error</code> event.</p>
         </div>
@@ -503,6 +508,16 @@ provider.on('synced', () => {
         <div class="api-entry">
           <div class="api-sig">provider.clearData(): Promise&lt;void&gt;</div>
           <p>Deletes the entire IndexedDB database, removing all updates and meta properties.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">writeSnapshot(name: string, update: Uint8Array, options?: { transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt; }): Promise&lt;void&gt;</div>
+          <p>Module-level helper that writes <code>update</code> as the complete content of database <code>name</code> (clearing any prior update rows) using this module's own store layout, and resolves only after the transaction has committed — a reload immediately afterwards cannot lose the snapshot. No live <code>IndexeddbPersistence</code> must be bound to <code>name</code> while this runs. The optional <code>transactionRunner</code> wraps the whole open→commit→close unit.</p>
+        </div>
+
+        <div class="api-entry">
+          <div class="api-sig">readSnapshot(name: string, options?: { transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt; }): Promise&lt;Uint8Array | null&gt;</div>
+          <p>Module-level helper that reads the complete persisted state of database <code>name</code> as one merged Yjs update, without constructing an <code>IndexeddbPersistence</code> binding. Resolves <code>null</code> when the database holds no updates (a missing database included). Multiple rows are merged with <code>Y.mergeUpdates</code>, so the result always hydrates a fresh doc to the full persisted state. The optional <code>transactionRunner</code> wraps the whole open→read→close unit.</p>
         </div>
       </div>
 
