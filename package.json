@@ -66,9 +66,6 @@
     "url": "https://github.com/vrwarp/y-idb/issues"
   },
   "homepage": "https://vrwarp.github.io/y-idb/",
-  "dependencies": {
-    "lib0": "^0.2.74"
-  },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
@@ -86,6 +83,7 @@
     "yjs": "^13.4.7"
   },
   "peerDependencies": {
+    "lib0": "^0.2.74",
     "yjs": "^13.0.0"
   },
   "engines": {
