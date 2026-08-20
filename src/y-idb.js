@@ -11,6 +11,21 @@ const updatesStoreName = 'updates'
 export const PREFERRED_TRIM_SIZE = 500
 
 /**
+ * Maximum number of rows the tiered trim leaves in the updates store before
+ * a full consolidation is forced. Incremental trims merge each tail of
+ * fresh updates into ONE delta row (O(new updates) work), so between full
+ * consolidations the store holds: 1 base row + up to this many delta rows.
+ */
+export const MAX_SEGMENT_ROWS = 24
+
+/**
+ * Delta rows are allowed to accumulate up to max(base row size, this many
+ * bytes) before a full consolidation is forced. Bounds the database size at
+ * roughly 2x the consolidated document size.
+ */
+export const MIN_FULL_COMPACT_BYTES = 1_048_576
+
+/**
  * @template T
  * @param {IndexeddbPersistence} idbPersistence
  * @param {() => Promise<T>} work
@@ -73,30 +88,182 @@ export const fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterAp
   transactWrite(idbPersistence, () => _fetchUpdates(idbPersistence, beforeApplyUpdatesCallback, afterApplyUpdatesCallback))
 
 /**
+ * Consolidates the updates store.
+ *
+ * Tiered strategy (the aged-document fix): re-encoding the WHOLE document
+ * with `Y.encodeStateAsUpdate` costs O(document) main-thread CPU and writes
+ * an O(document) row — paying that every PREFERRED_TRIM_SIZE updates makes
+ * both trim latency and write amplification grow linearly with document
+ * age. Instead:
+ *
+ * - **Incremental trim** (the common case): merge only the fresh tail rows
+ *   into ONE delta row with `Y.mergeUpdates` — O(new updates) CPU, no
+ *   document materialization, no O(document) write.
+ * - **Full consolidation** (rare, or `forceStore`): the legacy behavior —
+ *   write `Y.encodeStateAsUpdate(doc)` (which reflects in-memory GC) and
+ *   delete everything older. Triggered when delta rows accumulate beyond
+ *   MAX_SEGMENT_ROWS, or their bytes exceed max(base row,
+ *   MIN_FULL_COMPACT_BYTES), keeping the database bounded at roughly 2x
+ *   the consolidated document size.
+ *
  * @param {IndexeddbPersistence} idbPersistence
  * @param {boolean} forceStore
  */
 export const storeState = (idbPersistence, forceStore = true) =>
-  transactWrite(idbPersistence, () =>
-    _fetchUpdates(idbPersistence)
-      .then(updatesStore => {
+  transactWrite(idbPersistence, () => _storeState(idbPersistence, forceStore))
+
+/**
+ * Key of the tiered-trim bookkeeping record in the custom store.
+ * Written atomically with every trim (updates + custom in one transaction).
+ */
+const trimStateKey = '__yidb_trim_v1'
+
+/**
+ * @typedef {object} TrimState
+ * @property {number} baseKey Key of the full-consolidation row
+ * @property {number} lastSegKey Highest key already folded into a delta row
+ * @property {number} segBytes Total bytes of delta rows since the last full
+ * @property {number} baseBytes Size of the full-consolidation row
+ */
+
+/**
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {boolean} forceStore
+ * @return {Promise<any>}
+ */
+const _storeState = (idbPersistence, forceStore) => {
+  if (idbPersistence._destroyed) return promise.resolve()
+  if (!idbPersistence.db) {
+    return idbPersistence._db.then(db => {
+      idbPersistence.db = db
+      return _storeState(idbPersistence, forceStore)
+    })
+  }
+  const db = /** @type {IDBDatabase} */ (idbPersistence.db)
+  const prevDbref = idbPersistence._dbref
+  const [updatesStore, customStore] = idb.transact(db, [updatesStoreName, customStoreName], 'readwrite')
+  // Fetch (and apply) rows we have not seen yet — they may have been
+  // written by another tab.
+  return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(prevDbref, false)).then(newRows => {
+    if (idbPersistence._destroyed) return
+    Y.transact(idbPersistence.doc, () => {
+      newRows.forEach(val => Y.applyUpdate(idbPersistence.doc, val))
+    }, idbPersistence, false)
+    return idb.count(updatesStore).then(cnt => {
+      if (idbPersistence._destroyed) return
+      idbPersistence._dbsize = cnt
+      if (!forceStore && cnt < PREFERRED_TRIM_SIZE) {
+        // Nothing to trim; just advance the cursor past what was applied.
+        return idb.getLastKey(updatesStore).then(lastKey => {
+          if (idbPersistence._destroyed) return
+          idbPersistence._dbref = (lastKey === null || lastKey === undefined) ? 0 : lastKey + 1
+        })
+      }
+      return idb.get(customStore, trimStateKey).then((rawTrimState) => {
         if (idbPersistence._destroyed) return
-        if (forceStore || idbPersistence._dbsize >= PREFERRED_TRIM_SIZE) {
-          return idb.addAutoKey(updatesStore, Y.encodeStateAsUpdate(idbPersistence.doc))
-            .then(() => {
+        const trimState = /** @type {TrimState|undefined} */ (/** @type {unknown} */ (rawTrimState))
+
+        /**
+         * Full consolidation (legacy behavior): one row holding
+         * Y.encodeStateAsUpdate(doc) — O(document) CPU and write, so the
+         * tiered path below reserves it for when delta rows have piled up.
+         * The doc covers every stored row here: rows below prevDbref were
+         * applied during hydration/earlier fetches, newer ones just above.
+         * @return {Promise<any>}
+         */
+        const fullConsolidation = () => {
+          const fullState = Y.encodeStateAsUpdate(idbPersistence.doc)
+          return idb.addAutoKey(updatesStore, fullState)
+            .then(key => {
               if (idbPersistence._destroyed) return
-              return idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(idbPersistence._dbref, true))
+              idbPersistence._dbref = key + 1
+              return idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(key, true))
+                .then(() => idb.put(customStore, /** @type {any} */ ({
+                  baseKey: key,
+                  lastSegKey: key,
+                  segBytes: 0,
+                  baseBytes: fullState.byteLength
+                }), trimStateKey))
             })
             .then(() => {
               if (idbPersistence._destroyed) return
-              return idb.count(updatesStore).then(cnt => {
+              return idb.count(updatesStore).then(cnt2 => {
                 if (idbPersistence._destroyed) return
-                idbPersistence._dbsize = cnt
+                idbPersistence._dbsize = cnt2
               })
             })
         }
+
+        // No bookkeeping yet (fresh or legacy database) — establish the
+        // base row with a full consolidation.
+        if (forceStore || trimState === undefined || typeof trimState.lastSegKey !== 'number') {
+          return fullConsolidation()
+        }
+
+        // Incremental trim: fold every row after the last fold boundary
+        // into ONE delta row — O(new updates), no document re-encode. Rows
+        // between lastSegKey and prevDbref may predate this session
+        // (leftover tail from an earlier run); they were applied to the
+        // doc during hydration, but still need folding, so read them here.
+        return idb.getAllKeysValues(updatesStore, idb.createIDBKeyRangeLowerBound(trimState.lastSegKey, true)).then(tail => {
+          if (idbPersistence._destroyed) return
+          if (tail.length === 0) {
+            return undefined
+          }
+          // Rows in (baseKey, lastSegKey] are the delta rows written by
+          // earlier incremental trims (zero right after a full
+          // consolidation, when the two keys are equal).
+          const segRowsPromise = /** @type {Promise<number>} */ (
+            trimState.lastSegKey > trimState.baseKey
+              ? idb.count(updatesStore, idb.createIDBKeyRangeBound(trimState.baseKey, trimState.lastSegKey, true, false))
+              : promise.resolve(0)
+          )
+          return segRowsPromise.then(segRows => {
+            /** @type {Uint8Array} */
+            let merged
+            try {
+              merged = tail.length === 1 ? tail[0].v : Y.mergeUpdates(tail.map(row => row.v))
+            } catch (e) {
+              // A corrupted row cannot be merged — fall back to a full
+              // consolidation, which encodes the (valid) in-memory state
+              // and deletes the bad row.
+              return fullConsolidation()
+            }
+            const segBytes = trimState.segBytes + merged.byteLength
+            // Byte budget exceeded or too many delta rows: consolidate
+            // fully instead of writing yet another delta row. Bounds the
+            // database at roughly 2x the consolidated document.
+            if (
+              segRows + 1 >= idbPersistence._trimSegmentRows ||
+              segBytes >= Math.max(idbPersistence._trimFullCompactBytes, trimState.baseBytes)
+            ) {
+              return fullConsolidation()
+            }
+            return idb.addAutoKey(updatesStore, merged)
+              .then(key => {
+                if (idbPersistence._destroyed) return
+                idbPersistence._dbref = key + 1
+                return idb.del(updatesStore, idb.createIDBKeyRangeBound(tail[0].k, tail[tail.length - 1].k, false, false))
+                  .then(() => idb.put(customStore, /** @type {any} */ ({
+                    baseKey: trimState.baseKey,
+                    lastSegKey: key,
+                    segBytes,
+                    baseBytes: trimState.baseBytes
+                  }), trimStateKey))
+              })
+              .then(() => {
+                if (idbPersistence._destroyed) return
+                return idb.count(updatesStore).then(cnt2 => {
+                  if (idbPersistence._destroyed) return
+                  idbPersistence._dbsize = cnt2
+                })
+              })
+          })
+        })
       })
-  )
+    })
+  })
+}
 
 /**
  * @param {string} name
@@ -192,7 +359,7 @@ export const writeSnapshot = (name, update, { transactionRunner } = {}) => {
      */
     let tx
     try {
-      tx = db.transaction([updatesStoreName], 'readwrite')
+      tx = db.transaction([updatesStoreName, customStoreName], 'readwrite')
     } catch (e) {
       db.close()
       reject(e)
@@ -203,6 +370,9 @@ export const writeSnapshot = (name, update, { transactionRunner } = {}) => {
     const store = tx.objectStore(updatesStoreName)
     store.clear()
     store.add(update)
+    // The tiered-trim bookkeeping refers to row keys that no longer exist;
+    // drop it so the next trim re-establishes a fresh base row.
+    tx.objectStore(customStoreName).delete(trimStateKey)
     tx.oncomplete = () => {
       db.close()
       resolve(undefined)
@@ -228,13 +398,20 @@ export class IndexeddbPersistence extends Observable {
    * @param {<T>(work: () => Promise<T>) => Promise<T>} [opts.transactionRunner]
    * @param {number} [opts.maxRetries] Number of times a failed write is
    * retried with exponential backoff before 'retry-exhausted' is emitted.
+   * @param {number} [opts.trimSegmentRows] Maximum delta rows the tiered
+   * trim accumulates before forcing a full consolidation.
+   * @param {number} [opts.trimFullCompactBytes] Delta-row byte budget
+   * (lower bound; the effective budget is max(this, base row size)) before
+   * forcing a full consolidation.
    */
-  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner, maxRetries = 5 } = {}) {
+  constructor (name, doc, { writeDebounceMs = 0, durability = 'default', transactionRunner, maxRetries = 5, trimSegmentRows = MAX_SEGMENT_ROWS, trimFullCompactBytes = MIN_FULL_COMPACT_BYTES } = {}) {
     super()
     this.doc = doc
     this.name = name
     this._dbref = 0
     this._dbsize = 0
+    this._trimSegmentRows = trimSegmentRows
+    this._trimFullCompactBytes = trimFullCompactBytes
     this._destroyed = false
     this.writeDebounceMs = writeDebounceMs
     this.durability = durability

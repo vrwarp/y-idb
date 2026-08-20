@@ -37,13 +37,29 @@ provider.on('synced', () => {
       writeDebounceMs?: number,<br/>
       durability?: 'default' | 'relaxed',<br/>
       transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;,<br/>
-      maxRetries?: number<br/>
+      maxRetries?: number,<br/>
+      trimSegmentRows?: number,<br/>
+      trimFullCompactBytes?: number<br/>
     } = {}<br/>
   )</code></b></dt>
   <dd>
 Create a y-idb persistence provider. Specify docName as a unique string
 that identifies this document. In most cases, you want to use the same identifier
 that is used as the room-name in the connection provider.
+
+<b>Tiered trim.</b> When the updates store reaches
+<code>PREFERRED_TRIM_SIZE</code> (500) rows, the provider trims it. The
+common trim is <i>incremental</i>: the fresh tail of rows is folded into
+ONE delta row with <code>Y.mergeUpdates</code> — O(new updates) work — so
+trim latency and bytes written stay flat as the document ages. A <i>full
+consolidation</i> (re-encode the whole document into a single row, which
+also drops content Yjs has garbage-collected in memory) runs only when
+delta rows have accumulated: more than <code>options.trimSegmentRows</code>
+(default 24) of them, or more delta bytes than
+max(<code>options.trimFullCompactBytes</code> (default 1 MiB), the base
+row's size) — bounding the database at roughly 2&times; the consolidated
+document size. Explicit <code>storeState(provider, true)</code> calls
+always consolidate fully.
 
 An optional <code>options.writeDebounceMs</code> (default <code>0</code>, which
 coalesces writes on a microtask) can be supplied to debounce and aggregate
