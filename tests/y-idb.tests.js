@@ -55,7 +55,10 @@ export const testIdbUpdateAndMerge = async tc => {
   await promise.wait(100)
   await fetchUpdates(persistence2)
   t.assert(arr2.length === PREFERRED_TRIM_SIZE + 1)
-  t.assert(persistence1._dbsize === 1) // wait for dbsize === 0. db should be concatenated
+  // Tiered trim: the fresh tail is folded into ONE delta row; rows that
+  // predate the tail (the initial-state row) stay untouched until a full
+  // consolidation, so the count is small but not necessarily 1.
+  t.assert(persistence1._dbsize <= 3)
   await persistence1.destroy()
   await persistence2.destroy()
 }
@@ -481,6 +484,147 @@ export const testTrimDeletesOldKeys = async tc => {
 
   t.assert(persistence._dbref > PREFERRED_TRIM_SIZE)
   t.assert(persistence._dbsize < 15)
+  await persistence.destroy()
+}
+
+/**
+ * Tiered trim: the common trim path folds the fresh tail of updates into
+ * one delta row (O(new updates)) instead of re-encoding the whole document
+ * (O(document)). The store then holds base + delta rows, and hydration
+ * yields the identical document.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testIncrementalTrimKeepsState = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const map = doc.getMap('m')
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  persistence._storeTimeout = 1e9 // trims are driven explicitly below
+  await persistence.whenSynced
+
+  // First wave: the very first trim has no bookkeeping yet and
+  // establishes the base row with a full consolidation.
+  for (let i = 0; i < PREFERRED_TRIM_SIZE + 20; i++) {
+    map.set('k' + (i % 50), i)
+  }
+  await persistence.flush()
+  await storeState(persistence, false)
+  t.assert(persistence._dbsize === 1, 'first trim establishes the base row')
+
+  // Second wave: incremental — ONE delta row appended, base untouched.
+  for (let i = 0; i < PREFERRED_TRIM_SIZE + 20; i++) {
+    map.set('k' + (i % 50), 10000 + i)
+  }
+  await persistence.flush()
+  await storeState(persistence, false)
+  t.assert(persistence._dbsize === 2, 'second trim folds the tail into one delta row')
+
+  // Third wave: another delta row.
+  for (let i = 0; i < PREFERRED_TRIM_SIZE + 20; i++) {
+    map.set('k' + (i % 50), 20000 + i)
+  }
+  await persistence.flush()
+  await storeState(persistence, false)
+  t.assert(persistence._dbsize === 3, 'third trim appends another delta row')
+
+  // Hydration equivalence: a fresh provider sees the exact same state
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compare(doc2.getMap('m').toJSON(), map.toJSON())
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
+ * Tiered trim: accumulating trimSegmentRows delta rows forces a full
+ * consolidation back down to a single row.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFullConsolidationAtSegmentRowCap = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const arr = doc.getArray('t')
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { trimSegmentRows: 3 })
+  persistence._storeTimeout = 1e9
+  await persistence.whenSynced
+
+  const sizes = []
+  for (let round = 0; round < 4; round++) {
+    for (let i = 0; i < PREFERRED_TRIM_SIZE + 5; i++) {
+      arr.insert(0, [round * 10000 + i])
+    }
+    await persistence.flush()
+    await storeState(persistence, false)
+    sizes.push(persistence._dbsize)
+    t.assert(persistence._dbsize <= persistence._trimSegmentRows)
+  }
+  // Expected cycle with cap 3: full(1), delta(2), delta(3), full(1)
+  t.compare(sizes, [1, 2, 3, 1])
+
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.assert(doc2.getArray('t').length === arr.length)
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
+ * Tiered trim: delta bytes crossing max(trimFullCompactBytes, base row)
+ * force a full consolidation, bounding the database at ~2x document size.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFullConsolidationAtByteBudget = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const map = doc.getMap('m')
+  // A 1-byte budget makes EVERY post-base trim consolidate fully
+  const persistence = new IndexeddbPersistence(tc.testName, doc, { trimFullCompactBytes: 1 })
+  persistence._storeTimeout = 1e9
+  await persistence.whenSynced
+
+  for (let round = 0; round < 2; round++) {
+    // Raw update bytes per wave (500 sets of ~60 chars, all but 20 of
+    // them overwritten) far exceed the consolidated base, so the budget
+    // max(1, baseBytes) is always crossed.
+    for (let i = 0; i < PREFERRED_TRIM_SIZE + 5; i++) {
+      map.set('k' + (i % 20), 'x'.repeat(60) + i)
+    }
+    await persistence.flush()
+    await storeState(persistence, false)
+    t.assert(persistence._dbsize === 1, 'byte budget exceeded -> full consolidation')
+  }
+
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+  t.compare(doc2.getMap('m').toJSON(), map.toJSON())
+  await persistence.destroy()
+  await persistence2.destroy()
+}
+
+/**
+ * forceStore=true keeps its legacy meaning: one full-state row.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testForceStoreStillConsolidates = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const arr = doc.getArray('t')
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  persistence._storeTimeout = 0
+  await persistence.whenSynced
+  for (let i = 0; i < 40; i++) {
+    arr.insert(0, [i])
+  }
+  await persistence.flush()
+  await storeState(persistence, true)
+  t.assert(persistence._dbsize === 1)
   await persistence.destroy()
 }
 
