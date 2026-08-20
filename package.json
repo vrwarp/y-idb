@@ -13,6 +13,7 @@
   "scripts": {
     "clean": "rm -rf dist",
     "test": "npm run lint && c8 node tests/node.js",
+    "bench": "node benchmarks/aging.mjs",
     "dist": "rollup -c && node scripts/gen-cts.js",
     "build": "npm run clean && tsc && npm run dist",
     "prepare": "npm run build",
