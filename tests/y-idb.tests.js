@@ -1766,3 +1766,659 @@ export const testReadSnapshotUsesRunner = async tc => {
   t.assert(workSettledInsideRunner, 'work settled inside the runner')
   t.assert(read !== null)
 }
+
+/*
+ * -------------------------------------------------------------------------
+ * Mutation-testing driven coverage.
+ *
+ * The suite reached every line of y-idb.js — no uncovered mutants at all —
+ * yet only killed 53% of them. What that gap means is that a great deal of
+ * code ran without anything asserting on its behaviour. The tests below
+ * target the specific decisions mutation testing found unverified, with a
+ * bias toward the ones whose failure mode is silent data loss.
+ * -------------------------------------------------------------------------
+ */
+
+/**
+ * Swaps in listener-capturing globals for the duration of `fn`.
+ *
+ * The default harness registers `addEventListener` / `document` as no-ops,
+ * so the tab-close and visibility handlers were installed and then never
+ * invoked — the exact path that exists to stop pending writes being lost
+ * when a tab goes away. Capturing them lets a test fire them for real.
+ *
+ * @param {(fire: (type: string) => void, setVisibility: (state: string) => void) => Promise<void>} fn
+ */
+const withCapturedLifecycle = async fn => {
+  const originalAdd = globalThis.addEventListener
+  const originalDocument = globalThis.document
+  /** @type {Map<string, Function[]>} */
+  const listeners = new Map()
+  const record = (type, handler) => {
+    const existing = listeners.get(type) || []
+    existing.push(handler)
+    listeners.set(type, existing)
+  }
+
+  globalThis.addEventListener = record
+  globalThis.document = {
+    addEventListener: record,
+    removeEventListener: () => {},
+    visibilityState: 'visible'
+  }
+
+  const fire = type => {
+    for (const handler of listeners.get(type) || []) handler()
+  }
+  const setVisibility = state => {
+    globalThis.document.visibilityState = state
+  }
+
+  try {
+    await fn(fire, setVisibility)
+  } finally {
+    globalThis.addEventListener = originalAdd
+    globalThis.document = originalDocument
+  }
+}
+
+/**
+ * The pagehide handler must flush buffered updates. Registration alone was
+ * previously all that was checked.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPagehideFlushesPendingUpdates = async tc => {
+  await clearDocument(tc.testName)
+  await withCapturedLifecycle(async fire => {
+    const doc = new Y.Doc()
+    const persistence = new IndexeddbPersistence(tc.testName, doc)
+    await persistence.whenSynced
+
+    doc.getArray('t').insert(0, [1, 2, 3])
+    t.assert(persistence._pendingUpdates.length > 0, 'update should be buffered')
+
+    fire('pagehide')
+
+    t.assert(persistence._pendingUpdates.length === 0, 'pagehide must drain the buffer')
+    await persistence.destroy()
+  })
+}
+
+/**
+ * visibilitychange must flush only when the page actually became hidden —
+ * firing on every tab focus change would write on every alt-tab.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testVisibilityChangeFlushesOnlyWhenHidden = async tc => {
+  await clearDocument(tc.testName)
+  await withCapturedLifecycle(async (fire, setVisibility) => {
+    const doc = new Y.Doc()
+    const persistence = new IndexeddbPersistence(tc.testName, doc)
+    await persistence.whenSynced
+
+    doc.getArray('t').insert(0, [1])
+    const buffered = persistence._pendingUpdates.length
+    t.assert(buffered > 0)
+
+    setVisibility('visible')
+    fire('visibilitychange')
+    t.assert(persistence._pendingUpdates.length === buffered, 'visible must not flush')
+
+    setVisibility('hidden')
+    fire('visibilitychange')
+    t.assert(persistence._pendingUpdates.length === 0, 'hidden must flush')
+
+    await persistence.destroy()
+  })
+}
+
+/**
+ * The unload flush must be a no-op when there is nothing buffered, rather
+ * than opening an empty transaction on every tab switch.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUnloadListenerNoOpWhenEmpty = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  t.assert(persistence._pendingUpdates.length === 0)
+  persistence._unloadListener()
+  t.assert(persistence._pendingUpdates.length === 0)
+
+  await persistence.destroy()
+}
+
+/**
+ * If the unload transaction cannot even be opened, the batch must go back
+ * into the buffer — dropping it loses the user's last edits.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUnloadRestoresBatchWhenTransactionThrows = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  doc.getArray('t').insert(0, [1])
+  const buffered = persistence._pendingUpdates.length
+  t.assert(buffered > 0)
+
+  const realDb = persistence.db
+  persistence.db = {
+    transaction: () => { throw new Error('db closing') }
+  }
+  persistence._unloadListener()
+
+  t.assert(persistence._pendingUpdates.length === buffered, 'batch must be restored, not dropped')
+
+  persistence.db = realDb
+  await persistence.destroy()
+}
+
+/**
+ * A destroyed persistence must NOT restore the batch — it is shutting down
+ * and the buffer is about to be discarded either way.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUnloadDoesNotRestoreAfterDestroy = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  doc.getArray('t').insert(0, [1])
+  persistence._destroyed = true
+  persistence.db = {
+    transaction: () => { throw new Error('db closing') }
+  }
+  persistence._unloadListener()
+
+  t.assert(persistence._pendingUpdates.length === 0, 'destroyed instance must not re-buffer')
+  persistence._destroyed = false
+  await persistence.destroy()
+}
+
+/**
+ * The unload flush needs an open database; with none it must leave the
+ * buffer untouched so a later flush can still write it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUnloadKeepsBufferWithoutDb = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  doc.getArray('t').insert(0, [1])
+  const buffered = persistence._pendingUpdates.length
+  const realDb = persistence.db
+  persistence.db = null
+  persistence._unloadListener()
+
+  t.assert(persistence._pendingUpdates.length === buffered, 'no db means keep the buffer')
+
+  persistence.db = realDb
+  await persistence.destroy()
+}
+
+/**
+ * `_dbref` after a fetch must sit one past the last key, and must be 0 for
+ * an empty store. Both the null and the undefined form of "no rows" have
+ * to land on 0 — one of them slipping through leaves _dbref as NaN and the
+ * next fetch re-applies every row.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDbRefAdvancesPastLastKey = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  t.assert(persistence._dbref === 0, 'empty store starts at 0')
+
+  doc.getArray('t').insert(0, [1])
+  await persistence.flush()
+  await fetchUpdates(persistence)
+
+  t.assert(Number.isInteger(persistence._dbref), '_dbref must stay an integer')
+  t.assert(persistence._dbref > 0, '_dbref must advance past written rows')
+
+  const before = persistence._dbref
+  await fetchUpdates(persistence)
+  t.assert(persistence._dbref === before, 'a second fetch with no new rows must not move _dbref')
+
+  await persistence.destroy()
+}
+
+/**
+ * readSnapshot/writeSnapshot must reject with the transaction's own error
+ * when there is one, and still reject with a descriptive fallback when the
+ * transaction reports none.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testSnapshotRejectionCarriesTransactionError = async tc => {
+  await clearDocument(tc.testName)
+
+  const failing = new Error('explicit tx failure')
+  const runnerWithError = () => { throw failing }
+
+  let readErr = null
+  try {
+    await readSnapshot(tc.testName, { transactionRunner: runnerWithError })
+  } catch (e) { readErr = e }
+  t.assert(readErr === failing, 'readSnapshot must surface the underlying error')
+
+  let writeErr = null
+  try {
+    await writeSnapshot(tc.testName, new Uint8Array([1]), { transactionRunner: runnerWithError })
+  } catch (e) { writeErr = e }
+  t.assert(writeErr === failing, 'writeSnapshot must surface the underlying error')
+}
+
+/**
+ * A trim must be scheduled once the row count reaches the threshold, and a
+ * pending trim timer must not be reset by later writes — resetting it under
+ * sustained writes postpones the trim forever and the store grows unbounded.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTrimTimerIsNotResetBySubsequentWrites = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  persistence._dbsize = PREFERRED_TRIM_SIZE
+  doc.getArray('t').insert(0, [1])
+  await persistence.flush()
+
+  const firstTimer = persistence._storeTimeoutId
+  t.assert(firstTimer !== null, 'reaching the threshold must arm a trim')
+
+  doc.getArray('t').insert(0, [2])
+  await persistence.flush()
+
+  t.assert(
+    persistence._storeTimeoutId === firstTimer,
+    'a pending trim timer must survive later writes'
+  )
+
+  await persistence.destroy()
+}
+
+/**
+ * Below the threshold no trim is armed at all.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testNoTrimBelowThreshold = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  persistence._dbsize = PREFERRED_TRIM_SIZE - 2
+  doc.getArray('t').insert(0, [1])
+  await persistence.flush()
+
+  t.assert(persistence._storeTimeoutId === null, 'below the threshold must not arm a trim')
+
+  await persistence.destroy()
+}
+
+/**
+ * A flush must not be scheduled while a retry backoff is armed — doing so
+ * bypasses the backoff and hammers a failing database.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testScheduleFlushRespectsRetryBackoff = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  persistence._retryTimeoutId = setTimeout(() => {}, 10_000)
+  persistence._flushScheduled = false
+  persistence._pendingUpdates.push(new Uint8Array([1]))
+  persistence._scheduleFlush()
+
+  t.assert(persistence._flushScheduled === false, 'backoff must suppress scheduling')
+
+  clearTimeout(persistence._retryTimeoutId)
+  persistence._retryTimeoutId = null
+  persistence._pendingUpdates.length = 0
+  await persistence.destroy()
+}
+
+/**
+ * _scheduleFlush must bail on each of its guard conditions independently.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testScheduleFlushGuards = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  // Nothing buffered.
+  persistence._flushScheduled = false
+  persistence._scheduleFlush()
+  t.assert(persistence._flushScheduled === false, 'empty buffer must not schedule')
+
+  // Already writing.
+  persistence._pendingUpdates.push(new Uint8Array([1]))
+  persistence._writing = true
+  persistence._scheduleFlush()
+  t.assert(persistence._flushScheduled === false, 'an in-flight write must not schedule')
+  persistence._writing = false
+
+  // Destroyed.
+  persistence._destroyed = true
+  persistence._scheduleFlush()
+  t.assert(persistence._flushScheduled === false, 'a destroyed instance must not schedule')
+  persistence._destroyed = false
+
+  persistence._pendingUpdates.length = 0
+  await persistence.destroy()
+}
+
+/**
+ * destroy() must unregister both lifecycle listeners. Leaving them attached
+ * keeps the instance (and its document) reachable for the page's lifetime,
+ * and a later pagehide would run a flush against a closed database.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyRemovesLifecycleListeners = async tc => {
+  await clearDocument(tc.testName)
+  const originalAdd = globalThis.addEventListener
+  const originalRemove = globalThis.removeEventListener
+  const originalDocument = globalThis.document
+  /** @type {string[]} */
+  const removed = []
+
+  globalThis.addEventListener = () => {}
+  globalThis.removeEventListener = type => { removed.push(`window:${type}`) }
+  globalThis.document = {
+    addEventListener: () => {},
+    removeEventListener: type => { removed.push(`document:${type}`) },
+    visibilityState: 'visible'
+  }
+
+  try {
+    const doc = new Y.Doc()
+    const persistence = new IndexeddbPersistence(tc.testName, doc)
+    await persistence.whenSynced
+    await persistence.destroy()
+
+    t.assert(removed.includes('window:pagehide'), 'pagehide listener must be removed')
+    t.assert(removed.includes('document:visibilitychange'), 'visibilitychange listener must be removed')
+  } finally {
+    globalThis.addEventListener = originalAdd
+    globalThis.removeEventListener = originalRemove
+    globalThis.document = originalDocument
+  }
+}
+
+/**
+ * With no `document` in the environment (a worker), destroy must not try to
+ * remove a visibility listener it never registered.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyWithoutDocumentGlobal = async tc => {
+  await clearDocument(tc.testName)
+  const originalDocument = globalThis.document
+
+  delete globalThis.document
+  try {
+    const doc = new Y.Doc()
+    const persistence = new IndexeddbPersistence(tc.testName, doc)
+    await persistence.whenSynced
+    t.assert(persistence._visibilityListener === undefined, 'no document means no visibility listener')
+    await persistence.destroy()
+    t.assert(persistence._destroyed === true)
+  } finally {
+    globalThis.document = originalDocument
+  }
+}
+
+/**
+ * destroy() must clear both pending timers. A surviving trim or retry timer
+ * fires against a closed database after teardown.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyClearsPendingTimers = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  persistence._storeTimeoutId = setTimeout(() => {}, 10_000)
+  persistence._retryTimeoutId = setTimeout(() => {}, 10_000)
+
+  await persistence.destroy()
+
+  t.assert(persistence._storeTimeoutId === null, 'trim timer must be cleared')
+  t.assert(persistence._retryTimeoutId === null, 'retry timer must be cleared')
+}
+
+/**
+ * destroy() is idempotent and returns the same promise, so concurrent
+ * teardown paths (an explicit call plus the doc's own destroy event) do not
+ * run the final flush twice.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyReturnsSamePromise = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  const first = persistence.destroy()
+  const second = persistence.destroy()
+
+  t.assert(first === second, 'destroy must return the same promise')
+  await first
+}
+
+/**
+ * The final flush at teardown must write whatever is still buffered — this
+ * is the last chance for those edits to reach disk.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyFlushesBufferedUpdates = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  doc.getArray('t').insert(0, ['written-at-teardown'])
+  t.assert(persistence._pendingUpdates.length > 0)
+  await persistence.destroy()
+
+  // Reopen and confirm the edit survived.
+  const doc2 = new Y.Doc()
+  const persistence2 = new IndexeddbPersistence(tc.testName, doc2)
+  await persistence2.whenSynced
+
+  t.compare(doc2.getArray('t').toArray(), ['written-at-teardown'])
+  await persistence2.destroy()
+}
+
+/**
+ * With nothing buffered, teardown must not open a write transaction at all.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyWithEmptyBufferDoesNotWrite = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  let opened = 0
+  const realDb = persistence.db
+  persistence.db = {
+    transaction: (...args) => { opened += 1; return realDb.transaction(...args) }
+  }
+  t.assert(persistence._pendingUpdates.length === 0)
+
+  await persistence.destroy()
+  t.assert(opened === 0, 'an empty buffer must not open a transaction at teardown')
+}
+
+/**
+ * A failure during the teardown write must surface as an 'error' event
+ * rather than rejecting destroy() — callers await destroy during unmount
+ * and an unhandled rejection there takes down the caller.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyEmitsErrorInsteadOfRejecting = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  /** @type {any[]} */
+  const errors = []
+  persistence.on('error', err => { errors.push(err) })
+
+  doc.getArray('t').insert(0, [1])
+  persistence.db = {
+    transaction: () => { throw new Error('teardown write failed') }
+  }
+
+  await persistence.destroy()
+
+  t.assert(errors.length > 0, 'the failure must be emitted')
+  t.assert(String(errors[0]).includes('teardown write failed'))
+}
+
+/**
+ * fetchUpdates must invoke the after-callback, and must tolerate its
+ * absence — both call sites rely on the optional form.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testFetchUpdatesCallbacks = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  doc.getArray('t').insert(0, [1])
+  await persistence.flush()
+
+  let before = 0
+  let after = 0
+  await fetchUpdates(persistence, () => { before += 1 }, () => { after += 1 })
+
+  t.assert(before === 1, 'before-callback must run exactly once')
+  t.assert(after === 1, 'after-callback must run exactly once')
+
+  // Absent callbacks must not throw.
+  await fetchUpdates(persistence)
+
+  await persistence.destroy()
+}
+
+/**
+ * storeState on a destroyed instance must be a no-op rather than writing.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testStoreStateAfterDestroyIsNoOp = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+  await persistence.destroy()
+
+  // Must resolve rather than throwing against the closed database.
+  await storeState(persistence, true)
+  t.assert(persistence._destroyed === true)
+}
+
+/**
+ * readSnapshot signals "nothing stored" with null rather than an empty
+ * update or a throw, so a first launch is not an error path — and callers
+ * must branch on null rather than handing the result straight to
+ * Y.applyUpdate.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testReadSnapshotOnFreshDatabase = async tc => {
+  await clearDocument(tc.testName)
+
+  t.assert(await readSnapshot(tc.testName) === null, 'a fresh database reads back as null')
+}
+
+/**
+ * Once a single row exists it is returned as-is; several rows are merged
+ * into one update. Both shapes must apply cleanly.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testReadSnapshotMergesMultipleRows = async tc => {
+  await clearDocument(tc.testName)
+  const doc = new Y.Doc()
+  const persistence = new IndexeddbPersistence(tc.testName, doc)
+  await persistence.whenSynced
+
+  doc.getArray('t').insert(0, ['one'])
+  await persistence.flush()
+
+  const single = await readSnapshot(tc.testName)
+  t.assert(single instanceof Uint8Array, 'a single row comes back as an update')
+
+  doc.getArray('t').insert(1, ['two'])
+  await persistence.flush()
+
+  const merged = await readSnapshot(tc.testName)
+  const restored = new Y.Doc()
+  Y.applyUpdate(restored, /** @type {Uint8Array} */ (merged))
+
+  t.compare(restored.getArray('t').toArray(), ['one', 'two'], 'multiple rows must merge')
+
+  await persistence.destroy()
+}
+
+/**
+ * writeSnapshot then readSnapshot must round-trip, and the write must
+ * replace rather than append — otherwise the store grows on every save.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testWriteSnapshotReplacesPrevious = async tc => {
+  await clearDocument(tc.testName)
+
+  const first = new Y.Doc()
+  first.getArray('t').insert(0, ['one'])
+  await writeSnapshot(tc.testName, Y.encodeStateAsUpdate(first))
+
+  const second = new Y.Doc()
+  second.getArray('t').insert(0, ['two'])
+  await writeSnapshot(tc.testName, Y.encodeStateAsUpdate(second))
+
+  const restored = new Y.Doc()
+  Y.applyUpdate(restored, await readSnapshot(tc.testName))
+
+  t.compare(restored.getArray('t').toArray(), ['two'], 'the latest snapshot must win')
+}
