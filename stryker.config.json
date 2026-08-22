@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing. The suite is a lib0/testing harness driven by a plain node entrypoint, so Stryker uses the command runner (exit code = pass/fail). That runner cannot do per-test coverage analysis, so every mutant pays a full ~10s suite run; keep `mutate` tight and use --mutate when iterating.",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "commandRunner": { "command": "node tests/node.js" },
+  "coverageAnalysis": "off",
+  "reporters": ["html", "clear-text", "progress"],
+  "htmlReporter": { "fileName": "reports/mutation/index.html" },
+  "concurrency": 3,
+  "timeoutMS": 60000,
+  "mutate": ["src/**/*.js"],
+  "thresholds": { "high": 90, "low": 80, "break": 0 },
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true
+}
