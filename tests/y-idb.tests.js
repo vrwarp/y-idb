@@ -1794,24 +1794,24 @@ const withCapturedLifecycle = async fn => {
   const originalDocument = globalThis.document
   /** @type {Map<string, Function[]>} */
   const listeners = new Map()
-  const record = (type, handler) => {
+  const record = (/** @type {string} */ type, /** @type {Function} */ handler) => {
     const existing = listeners.get(type) || []
     existing.push(handler)
     listeners.set(type, existing)
   }
 
-  globalThis.addEventListener = record
-  globalThis.document = {
+  globalThis.addEventListener = /** @type {any} */ (record)
+  globalThis.document = /** @type {any} */ ({
     addEventListener: record,
     removeEventListener: () => {},
     visibilityState: 'visible'
-  }
+  })
 
-  const fire = type => {
+  const fire = (/** @type {string} */ type) => {
     for (const handler of listeners.get(type) || []) handler()
   }
-  const setVisibility = state => {
-    globalThis.document.visibilityState = state
+  const setVisibility = (/** @type {string} */ state) => {
+    /** @type {any} */ (globalThis.document).visibilityState = state
   }
 
   try {
@@ -1910,9 +1910,9 @@ export const testUnloadRestoresBatchWhenTransactionThrows = async tc => {
   t.assert(buffered > 0)
 
   const realDb = persistence.db
-  persistence.db = {
+  persistence.db = /** @type {any} */ ({
     transaction: () => { throw new Error('db closing') }
-  }
+  })
   persistence._unloadListener()
 
   t.assert(persistence._pendingUpdates.length === buffered, 'batch must be restored, not dropped')
@@ -1935,9 +1935,9 @@ export const testUnloadDoesNotRestoreAfterDestroy = async tc => {
 
   doc.getArray('t').insert(0, [1])
   persistence._destroyed = true
-  persistence.db = {
+  persistence.db = /** @type {any} */ ({
     transaction: () => { throw new Error('db closing') }
-  }
+  })
   persistence._unloadListener()
 
   t.assert(persistence._pendingUpdates.length === 0, 'destroyed instance must not re-buffer')
@@ -2150,12 +2150,12 @@ export const testDestroyRemovesLifecycleListeners = async tc => {
   const removed = []
 
   globalThis.addEventListener = () => {}
-  globalThis.removeEventListener = type => { removed.push(`window:${type}`) }
-  globalThis.document = {
+  globalThis.removeEventListener = (/** @type {string} */ type) => { removed.push(`window:${type}`) }
+  globalThis.document = /** @type {any} */ ({
     addEventListener: () => {},
-    removeEventListener: type => { removed.push(`document:${type}`) },
+    removeEventListener: (/** @type {string} */ type) => { removed.push(`document:${type}`) },
     visibilityState: 'visible'
-  }
+  })
 
   try {
     const doc = new Y.Doc()
@@ -2182,7 +2182,7 @@ export const testDestroyWithoutDocumentGlobal = async tc => {
   await clearDocument(tc.testName)
   const originalDocument = globalThis.document
 
-  delete globalThis.document
+  delete (/** @type {any} */ (globalThis).document)
   try {
     const doc = new Y.Doc()
     const persistence = new IndexeddbPersistence(tc.testName, doc)
@@ -2273,10 +2273,13 @@ export const testDestroyWithEmptyBufferDoesNotWrite = async tc => {
   await persistence.whenSynced
 
   let opened = 0
-  const realDb = persistence.db
-  persistence.db = {
-    transaction: (...args) => { opened += 1; return realDb.transaction(...args) }
-  }
+  const realDb = /** @type {IDBDatabase} */ (persistence.db)
+  persistence.db = /** @type {any} */ ({
+    transaction: (/** @type {any[]} */ ...args) => {
+      opened += 1
+      return realDb.transaction(...(/** @type {[string[]]} */ (args)))
+    }
+  })
   t.assert(persistence._pendingUpdates.length === 0)
 
   await persistence.destroy()
@@ -2298,12 +2301,12 @@ export const testDestroyEmitsErrorInsteadOfRejecting = async tc => {
 
   /** @type {any[]} */
   const errors = []
-  persistence.on('error', err => { errors.push(err) })
+  persistence.on('error', (/** @type {any} */ err) => { errors.push(err) })
 
   doc.getArray('t').insert(0, [1])
-  persistence.db = {
+  persistence.db = /** @type {any} */ ({
     transaction: () => { throw new Error('teardown write failed') }
-  }
+  })
 
   await persistence.destroy()
 
@@ -2418,7 +2421,7 @@ export const testWriteSnapshotReplacesPrevious = async tc => {
   await writeSnapshot(tc.testName, Y.encodeStateAsUpdate(second))
 
   const restored = new Y.Doc()
-  Y.applyUpdate(restored, await readSnapshot(tc.testName))
+  Y.applyUpdate(restored, /** @type {Uint8Array} */ (await readSnapshot(tc.testName)))
 
   t.compare(restored.getArray('t').toArray(), ['two'], 'the latest snapshot must win')
 }
