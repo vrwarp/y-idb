@@ -1166,9 +1166,10 @@ export class IndexeddbPersistence extends Observable {
         // pending timer: under sustained writes that would postpone the trim
         // indefinitely and let the store grow without bound. While trims
         // keep failing (e.g. a QuotaExceededError at commit), back off
-        // instead of retrying after every flush: each attempt re-reads and
-        // re-applies the rows written since the last committed trim, and a
-        // full consolidation re-encodes the whole doc.
+        // instead of retrying after every flush: each attempt redoes the
+        // trim, re-reading and re-merging the rows written since the last
+        // committed trim (re-applying those other tabs wrote) or, for a
+        // full consolidation, re-encoding the whole doc.
         if (!this._destroyed && this._dbsize >= PREFERRED_TRIM_SIZE && this._storeTimeoutId === null) {
           const backoff = Math.pow(2, Math.min(this._trimFailures, MAX_TRIM_BACKOFF_EXPONENT))
           this._storeTimeoutId = setTimeout(() => {
