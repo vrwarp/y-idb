@@ -566,6 +566,19 @@ export class IndexeddbPersistence extends Observable {
           }
         })
       }
+      // fetchUpdates can also throw synchronously (creating the transaction
+      // fails on a closing connection or a database without the 'updates'
+      // store). Route that into the rejection handler below instead of out
+      // of this callback.
+      /**
+       * @type {Promise<any>}
+       */
+      let hydration
+      try {
+        hydration = fetchUpdates(this, beforeApplyUpdatesCallback, afterApplyUpdatesCallback)
+      } catch (err) {
+        hydration = Promise.reject(err)
+      }
       // Defer the 'synced' emit to the hydration transaction's `complete`
       // event. That transaction carries the initial-state write above, so
       // `whenSynced` now guarantees the write has COMMITTED, not merely been
@@ -574,7 +587,7 @@ export class IndexeddbPersistence extends Observable {
       // is re-buffered and the failure reported like any failed write, and
       // the emit still happens (consumers must not wedge; the data has been
       // applied to the in-memory doc either way).
-      fetchUpdates(this, beforeApplyUpdatesCallback, afterApplyUpdatesCallback).then(updatesStore => {
+      hydration.then(updatesStore => {
         if (this._destroyed || !updatesStore) return
         hydrationSettled.then(() => {
           if (this._destroyed) return
@@ -594,6 +607,14 @@ export class IndexeddbPersistence extends Observable {
         }
         this._scheduleFlush()
       })
+    }, err => {
+      // Opening the database failed (backing store error, storage disabled,
+      // no IndexedDB, ...). Surface it instead of leaving an unhandled
+      // rejection. There is no connection to flush to, so updates stay
+      // buffered in memory and 'synced' never fires.
+      if (!this._destroyed) {
+        this.emit('error', [err])
+      }
     })
     /**
      * Timeout in ms until data is merged and persisted in idb.

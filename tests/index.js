@@ -5,6 +5,7 @@ import * as dbrefAbort from './dbref-abort.tests.js'
 import * as runnerSettle from './runner-settle.tests.js'
 import * as runnerSyncThrow from './runner-sync-throw.tests.js'
 import * as snapshotAtomicity from './snapshot-atomicity.tests.js'
+import * as openFailure from './open-failure.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -20,7 +21,8 @@ runTests({
   dbrefAbort,
   runnerSettle,
   runnerSyncThrow,
-  snapshotAtomicity
+  snapshotAtomicity,
+  openFailure
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
