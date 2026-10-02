@@ -414,12 +414,22 @@ export const writeSnapshot = (name, update, { transactionRunner } = {}) => {
     }
     // Raw requests on purpose (no promise wrappers): request failures
     // surface through tx.onerror below instead of dangling rejections.
-    const store = tx.objectStore(updatesStoreName)
-    store.clear()
-    store.add(update)
-    // The tiered-trim bookkeeping refers to row keys that no longer exist;
-    // drop it so the next trim re-establishes a fresh base row.
-    tx.objectStore(customStoreName).delete(trimStateKey)
+    try {
+      const store = tx.objectStore(updatesStoreName)
+      store.clear()
+      store.add(update)
+      // The tiered-trim bookkeeping refers to row keys that no longer exist;
+      // drop it so the next trim re-establishes a fresh base row.
+      tx.objectStore(customStoreName).delete(trimStateKey)
+    } catch (e) {
+      // add() throws synchronously when `update` cannot be cloned (e.g. a
+      // detached buffer). That does not abort the transaction, so it would
+      // commit the clear() alone and wipe the database — roll it back.
+      tx.abort()
+      db.close()
+      reject(e)
+      return
+    }
     tx.oncomplete = () => {
       db.close()
       resolve(undefined)
