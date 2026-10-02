@@ -26,6 +26,37 @@ export const MAX_SEGMENT_ROWS = 24
 export const MIN_FULL_COMPACT_BYTES = 1_048_576
 
 /**
+ * IDB request to promise. Used instead of lib0's request wrappers, which
+ * reject with `new Error(domException)` (name 'Error', the real name folded
+ * into the message) or, for cursors, with the raw error Event. This rejects
+ * with the request's own DOMException, so 'error' listeners see the real
+ * name (e.g. QuotaExceededError) on every path, as they do on the flush path.
+ *
+ * @param {IDBRequest} request
+ * @return {Promise<any>}
+ */
+const rtop = request => promise.create((resolve, reject) => {
+  request.onerror = () => reject(/** @type {DOMException} */ (request.error))
+  request.onsuccess = () => resolve(request.result)
+})
+
+/**
+ * @param {IDBObjectStore} store
+ * @return {Promise<any>} The highest key, or null if the store is empty
+ */
+const getLastKey = store =>
+  rtop(store.openKeyCursor(null, 'prev')).then(cursor => cursor === null ? null : cursor.key)
+
+/**
+ * @param {IDBObjectStore} store
+ * @param {IDBKeyRange} range
+ * @return {Promise<Array<{ k: any, v: any }>>}
+ */
+const getAllKeysValues = (store, range) =>
+  promise.all([rtop(store.getAllKeys(range)), rtop(store.getAll(range))])
+    .then(([ks, vs]) => ks.map((/** @type {any} */ k, /** @type {number} */ i) => ({ k, v: vs[i] })))
+
+/**
  * Run `work` through `transactionRunner` when one is supplied. Callers attach
  * their failure handling to the returned promise, so a runner that throws
  * synchronously (e.g. a non-async wrapper around a disposed lock) is turned
@@ -181,7 +212,7 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
     })
   }
   const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName], 'readwrite')
-  return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false)).then(updates => {
+  return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false))).then(updates => {
     if (idbPersistence._destroyed) return
     // getLastKey below can return the uncommitted initial-state row.
     restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
@@ -191,14 +222,14 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
   })
     .then(() => {
       if (idbPersistence._destroyed) return
-      return idb.getLastKey(updatesStore).then(lastKey => {
+      return getLastKey(updatesStore).then(lastKey => {
         if (idbPersistence._destroyed) return
         idbPersistence._dbref = (lastKey === null || lastKey === undefined) ? 0 : lastKey + 1
       })
     })
     .then(() => {
       if (idbPersistence._destroyed) return
-      return idb.count(updatesStore).then(cnt => {
+      return rtop(updatesStore.count()).then(cnt => {
         if (idbPersistence._destroyed) return
         idbPersistence._dbsize = cnt
       })
@@ -272,22 +303,22 @@ const _storeState = (idbPersistence, forceStore) => {
   const [updatesStore, customStore] = idb.transact(db, [updatesStoreName, customStoreName], 'readwrite')
   // Fetch (and apply) rows we have not seen yet — they may have been
   // written by another tab.
-  return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(prevDbref, false)).then(newRows => {
+  return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(prevDbref, false))).then(newRows => {
     if (idbPersistence._destroyed) return
     // The trims below advance _dbref past their own, uncommitted row.
     restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
     applyStoredUpdates(idbPersistence, newRows)
-    return idb.count(updatesStore).then(cnt => {
+    return rtop(updatesStore.count()).then(cnt => {
       if (idbPersistence._destroyed) return
       idbPersistence._dbsize = cnt
       if (!forceStore && cnt < PREFERRED_TRIM_SIZE) {
         // Nothing to trim; just advance the cursor past what was applied.
-        return idb.getLastKey(updatesStore).then(lastKey => {
+        return getLastKey(updatesStore).then(lastKey => {
           if (idbPersistence._destroyed) return
           idbPersistence._dbref = (lastKey === null || lastKey === undefined) ? 0 : lastKey + 1
         })
       }
-      return idb.get(customStore, trimStateKey).then((rawTrimState) => {
+      return rtop(customStore.get(trimStateKey)).then((rawTrimState) => {
         if (idbPersistence._destroyed) return
         const trimState = /** @type {TrimState|undefined} */ (/** @type {unknown} */ (rawTrimState))
 
@@ -302,23 +333,23 @@ const _storeState = (idbPersistence, forceStore) => {
          */
         const fullConsolidation = () => {
           const fullState = Y.encodeStateAsUpdate(idbPersistence.doc)
-          return idb.addAutoKey(updatesStore, fullState)
+          return rtop(updatesStore.add(fullState))
             .then(key => {
               if (idbPersistence._destroyed) return
               idbPersistence._dbref = key + 1
               // The delete below drops every older row, corrupt ones too.
               idbPersistence._hasCorruptRows = false
-              return idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(key, true))
-                .then(() => idb.put(customStore, /** @type {any} */ ({
+              return rtop(updatesStore.delete(idb.createIDBKeyRangeUpperBound(key, true)))
+                .then(() => rtop(customStore.put({
                   baseKey: key,
                   lastSegKey: key,
                   segBytes: 0,
                   baseBytes: fullState.byteLength
-                }), trimStateKey))
+                }, trimStateKey)))
             })
             .then(() => {
               if (idbPersistence._destroyed) return
-              return idb.count(updatesStore).then(cnt2 => {
+              return rtop(updatesStore.count()).then(cnt2 => {
                 if (idbPersistence._destroyed) return
                 idbPersistence._dbsize = cnt2
               })
@@ -337,7 +368,7 @@ const _storeState = (idbPersistence, forceStore) => {
         // between lastSegKey and prevDbref may predate this session
         // (leftover tail from an earlier run); they were applied to the
         // doc during hydration, but still need folding, so read them here.
-        return idb.getAllKeysValues(updatesStore, idb.createIDBKeyRangeLowerBound(trimState.lastSegKey, true)).then(tail => {
+        return getAllKeysValues(updatesStore, idb.createIDBKeyRangeLowerBound(trimState.lastSegKey, true)).then(tail => {
           if (idbPersistence._destroyed) return
           if (tail.length === 0) {
             return undefined
@@ -347,7 +378,7 @@ const _storeState = (idbPersistence, forceStore) => {
           // consolidation, when the two keys are equal).
           const segRowsPromise = /** @type {Promise<number>} */ (
             trimState.lastSegKey > trimState.baseKey
-              ? idb.count(updatesStore, idb.createIDBKeyRangeBound(trimState.baseKey, trimState.lastSegKey, true, false))
+              ? rtop(updatesStore.count(idb.createIDBKeyRangeBound(trimState.baseKey, trimState.lastSegKey, true, false)))
               : promise.resolve(0)
           )
           return segRowsPromise.then(segRows => {
@@ -371,21 +402,21 @@ const _storeState = (idbPersistence, forceStore) => {
             ) {
               return fullConsolidation()
             }
-            return idb.addAutoKey(updatesStore, merged)
+            return rtop(updatesStore.add(merged))
               .then(key => {
                 if (idbPersistence._destroyed) return
                 idbPersistence._dbref = key + 1
-                return idb.del(updatesStore, idb.createIDBKeyRangeBound(tail[0].k, tail[tail.length - 1].k, false, false))
-                  .then(() => idb.put(customStore, /** @type {any} */ ({
+                return rtop(updatesStore.delete(idb.createIDBKeyRangeBound(tail[0].k, tail[tail.length - 1].k, false, false)))
+                  .then(() => rtop(customStore.put({
                     baseKey: trimState.baseKey,
                     lastSegKey: key,
                     segBytes,
                     baseBytes: trimState.baseBytes
-                  }), trimStateKey))
+                  }, trimStateKey)))
               })
               .then(() => {
                 if (idbPersistence._destroyed) return
-                return idb.count(updatesStore).then(cnt2 => {
+                return rtop(updatesStore.count()).then(cnt2 => {
                   if (idbPersistence._destroyed) return
                   idbPersistence._dbsize = cnt2
                 })
@@ -698,9 +729,10 @@ export class IndexeddbPersistence extends Observable {
         tx.onabort = () => {
           hydrationTxState = 'aborted'
           this._requeueInitialState()
-          // The transaction's own error is the root cause; a rejected request
-          // of the chain only reports AbortError.
-          const err = tx.error || (deferredError !== null ? deferredError.err : new Error('hydration transaction aborted'))
+          // Report the chain's failure if it already rejected (a failed
+          // request), else what aborted the transaction (e.g. a commit-time
+          // QuotaExceededError).
+          const err = deferredError !== null ? deferredError.err : (tx.error || new Error('hydration transaction aborted'))
           deferredError = null
           emitHydrationError(err)
           emitSynced()
@@ -1188,7 +1220,7 @@ export class IndexeddbPersistence extends Observable {
   get (key) {
     return this._db.then(db => {
       const [custom] = idb.transact(db, [customStoreName], 'readonly')
-      return idb.get(custom, key)
+      return rtop(custom.get(key))
     })
   }
 
@@ -1201,7 +1233,7 @@ export class IndexeddbPersistence extends Observable {
     return this._db.then(db =>
       transactWrite(this, () => {
         const [custom] = idb.transact(db, [customStoreName])
-        return idb.put(custom, value, key)
+        return rtop(custom.put(value, key))
       })
     )
   }
@@ -1214,7 +1246,7 @@ export class IndexeddbPersistence extends Observable {
     return this._db.then(db =>
       transactWrite(this, () => {
         const [custom] = idb.transact(db, [customStoreName])
-        return idb.del(custom, key)
+        return rtop(custom.delete(key))
       })
     )
   }
