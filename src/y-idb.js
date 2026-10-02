@@ -521,6 +521,33 @@ export class IndexeddbPersistence extends Observable {
 
     this._db.then(db => {
       this.db = db
+      const emitSynced = () => {
+        if (this._destroyed) return
+        this.synced = true
+        this.emit('synced', [this])
+        this._scheduleFlush()
+      }
+      /**
+       * @param {any} err
+       */
+      const emitHydrationError = err => {
+        if (!this._destroyed) {
+          this.emit('error', [err])
+        }
+      }
+      /**
+       * State of the hydration transaction from the point its handlers are
+       * attached (see beforeApplyUpdatesCallback).
+       * @type {'unattached'|'running'|'complete'|'aborted'}
+       */
+      let hydrationTxState = 'unattached'
+      /**
+       * Failure of the hydration chain while its transaction was still
+       * running. The transaction's outcome reports it (see below), so one
+       * failed hydration emits one 'error'.
+       * @type {{ err: any }|null}
+       */
+      let deferredError = null
       /**
        * @param {IDBObjectStore} updatesStore
        */
@@ -532,39 +559,46 @@ export class IndexeddbPersistence extends Observable {
           // surface as an unhandled rejection instead of the tx error event.
           updatesStore.add(initUpdate)
         }
-      }
-      /**
-       * Settles when the hydration transaction finishes. Its handlers are
-       * attached inside the work: the transactionRunner may settle in a
-       * later task than the one in which the work resolved (a lock released
-       * after commit, a setTimeout hop, ...), by which time the transaction
-       * has already dispatched `complete`.
-       * @type {Promise<void>}
-       */
-      let hydrationSettled = promise.resolve()
-      /**
-       * @param {IDBObjectStore} updatesStore
-       */
-      const afterApplyUpdatesCallback = (updatesStore) => {
+        // Defer the 'synced' emit to the hydration transaction's `complete`
+        // event. That transaction carries the initial-state write above, so
+        // `whenSynced` guarantees the write has COMMITTED, not merely been
+        // issued. Stored updates are still applied to the doc strictly
+        // before the emit: neither event can dispatch before this task ends.
+        // Attach the handlers here, inside the work, not once fetchUpdates
+        // resolves: the transactionRunner may settle in a later task than
+        // the one in which the work resolved (a lock released after commit,
+        // a setTimeout hop, ...), by which time the transaction has already
+        // dispatched `complete`; and an app observer throwing out of the
+        // apply, or a request error aborting the transaction, rejects that
+        // chain after the rows are in the doc.
+        // On abort the initial-state write was rolled back: it is re-buffered
+        // and the failure reported like any failed write, and the emit still
+        // happens (consumers must not wedge; the data has been applied to the
+        // in-memory doc either way). No `error` handler: a request error
+        // bubbles to the transaction and is then followed by `abort`, so it
+        // would emit 'synced' twice.
         const tx = updatesStore.transaction
-        hydrationSettled = promise.create(resolve => {
-          tx.oncomplete = () => {
-            this._initialStatePending = false
-            resolve()
+        hydrationTxState = 'running'
+        tx.oncomplete = () => {
+          hydrationTxState = 'complete'
+          this._initialStatePending = false
+          if (deferredError !== null) {
+            const { err } = deferredError
+            deferredError = null
+            emitHydrationError(err)
           }
-          // A failed transaction can fire 'error' and then 'abort' — guard so
-          // one failure is handled once.
-          let handled = false
-          tx.onerror = tx.onabort = () => {
-            if (handled) return
-            handled = true
-            this._requeueInitialState()
-            if (!this._destroyed) {
-              this.emit('error', [tx.error])
-            }
-            resolve()
-          }
-        })
+          emitSynced()
+        }
+        tx.onabort = () => {
+          hydrationTxState = 'aborted'
+          this._requeueInitialState()
+          // The transaction's own error is the root cause; a rejected request
+          // of the chain only reports AbortError.
+          const err = tx.error || (deferredError !== null ? deferredError.err : new Error('hydration transaction aborted'))
+          deferredError = null
+          emitHydrationError(err)
+          emitSynced()
+        }
       }
       // fetchUpdates can also throw synchronously (creating the transaction
       // fails on a closing connection or a database without the 'updates'
@@ -575,35 +609,25 @@ export class IndexeddbPersistence extends Observable {
        */
       let hydration
       try {
-        hydration = fetchUpdates(this, beforeApplyUpdatesCallback, afterApplyUpdatesCallback)
+        hydration = fetchUpdates(this, beforeApplyUpdatesCallback)
       } catch (err) {
         hydration = Promise.reject(err)
       }
-      // Defer the 'synced' emit to the hydration transaction's `complete`
-      // event. That transaction carries the initial-state write above, so
-      // `whenSynced` now guarantees the write has COMMITTED, not merely been
-      // issued. Stored updates are still applied to the doc strictly before
-      // the emit. On abort/error the initial-state write was rolled back: it
-      // is re-buffered and the failure reported like any failed write, and
-      // the emit still happens (consumers must not wedge; the data has been
-      // applied to the in-memory doc either way).
-      hydration.then(updatesStore => {
-        if (this._destroyed || !updatesStore) return
-        hydrationSettled.then(() => {
-          if (this._destroyed) return
-          this.synced = true
-          this.emit('synced', [this])
-          this._scheduleFlush()
-        })
-      }, err => {
+      hydration.catch(err => {
         // Initial sync failed (corrupt database, failing transactionRunner,
         // ...). Surface it instead of leaving an unhandled rejection, and
         // still start flushing: the connection itself is open, so buffered
         // updates (and the initial state the failed sync did not write) can
         // be persisted.
-        this._requeueInitialState()
-        if (!this._destroyed) {
-          this.emit('error', [err])
+        if (hydrationTxState === 'running') {
+          // The stored rows were already applied and the transaction is still
+          // running: its outcome decides whether the initial state must be
+          // re-buffered, reports this failure and still emits 'synced'.
+          deferredError = { err }
+        } else if (hydrationTxState !== 'aborted') {
+          // (An abort has already re-buffered and reported the failure.)
+          this._requeueInitialState()
+          emitHydrationError(err)
         }
         this._scheduleFlush()
       })

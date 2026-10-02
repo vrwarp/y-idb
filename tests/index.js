@@ -6,6 +6,7 @@ import * as runnerSettle from './runner-settle.tests.js'
 import * as runnerSyncThrow from './runner-sync-throw.tests.js'
 import * as snapshotAtomicity from './snapshot-atomicity.tests.js'
 import * as openFailure from './open-failure.tests.js'
+import * as hydrationError from './hydration-error.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -22,7 +23,8 @@ runTests({
   runnerSettle,
   runnerSyncThrow,
   snapshotAtomicity,
-  openFailure
+  openFailure,
+  hydrationError
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
