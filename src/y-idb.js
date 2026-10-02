@@ -436,6 +436,14 @@ export class IndexeddbPersistence extends Observable {
      * @type {Array<Uint8Array>}
      */
     this._pendingUpdates = []
+    /**
+     * Whether content the doc held before this provider attached still
+     * depends on the hydration transaction, the only write of it, to
+     * commit. Every later update from this client builds on that content,
+     * so if hydration fails or is cut short it is re-buffered instead (see
+     * `_requeueInitialState`).
+     */
+    this._initialStatePending = doc.store.clients.size > 0
     this._writing = false
     this._flushScheduled = false
     /**
@@ -475,8 +483,10 @@ export class IndexeddbPersistence extends Observable {
       // the emit. The fetchUpdates promise chain settles inside the success
       // callback of the transaction's last request, strictly before the
       // `complete` event task dispatches, so attaching the handler here
-      // cannot miss it. On abort/error the emit still happens (consumers must
-      // not wedge; the data has been applied to the in-memory doc either way).
+      // cannot miss it. On abort/error the initial-state write was rolled
+      // back: it is re-buffered and the failure reported like any failed
+      // write, and the emit still happens (consumers must not wedge; the data
+      // has been applied to the in-memory doc either way).
       fetchUpdates(this, beforeApplyUpdatesCallback).then(updatesStore => {
         if (this._destroyed || !updatesStore) return
         const emitSynced = () => {
@@ -486,14 +496,29 @@ export class IndexeddbPersistence extends Observable {
           this._scheduleFlush()
         }
         const tx = updatesStore.transaction
-        tx.oncomplete = emitSynced
-        tx.onerror = emitSynced
-        tx.onabort = emitSynced
+        tx.oncomplete = () => {
+          this._initialStatePending = false
+          emitSynced()
+        }
+        // A failed transaction can fire 'error' and then 'abort' — guard so
+        // one failure is handled once.
+        let handled = false
+        tx.onerror = tx.onabort = () => {
+          if (handled) return
+          handled = true
+          this._requeueInitialState()
+          if (!this._destroyed) {
+            this.emit('error', [tx.error])
+          }
+          emitSynced()
+        }
       }, err => {
         // Initial sync failed (corrupt database, failing transactionRunner,
         // ...). Surface it instead of leaving an unhandled rejection, and
         // still start flushing: the connection itself is open, so buffered
-        // updates can be persisted.
+        // updates (and the initial state the failed sync did not write) can
+        // be persisted.
+        this._requeueInitialState()
         if (!this._destroyed) {
           this.emit('error', [err])
         }
@@ -524,6 +549,9 @@ export class IndexeddbPersistence extends Observable {
 
     this._unloadListener = () => {
       if (this.db && this._pendingUpdates.length > 0) {
+        // Hydration may not get to commit the initial state once the page
+        // is gone; the buffered updates build on it, so write it with them.
+        this._requeueInitialState()
         const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
         try {
           const tx = this.db.transaction([updatesStoreName], 'readwrite')
@@ -577,6 +605,19 @@ export class IndexeddbPersistence extends Observable {
         this._flush()
       })
     }
+  }
+
+  /**
+   * Re-buffer the content the doc held before this provider attached when
+   * the hydration transaction will not commit it (failed, aborted, or cut
+   * short by teardown), ahead of the updates that build on it. Without it,
+   * rows written by this client cannot be applied on reload. No-op once the
+   * initial state is committed or already re-buffered.
+   */
+  _requeueInitialState () {
+    if (!this._initialStatePending) return
+    this._initialStatePending = false
+    this._pendingUpdates.unshift(Y.encodeStateAsUpdate(this.doc))
   }
 
   /**
@@ -776,12 +817,17 @@ export class IndexeddbPersistence extends Observable {
       .then(() => this._db.then(() => {}, () => {}))
       .then(() => {
         const db = this.db
+        if (db) {
+          // Hydration may have been cut short before committing the initial
+          // state: write it with the final batch.
+          this._requeueInitialState()
+        }
         if (!this.synced) {
           // The initial sync did not complete, so its initial-state write
           // (see beforeApplyUpdatesCallback) may be missing, and updates made
           // on top of that state (buffered or already flushed) would not
           // decode without it. Write the whole doc state instead; it covers
-          // every buffered update.
+          // every buffered update (and the re-queued initial state).
           const initUpdate = Y.encodeStateAsUpdate(this.doc)
           if (initUpdate.length > 2) {
             this._pendingUpdates = [initUpdate]
