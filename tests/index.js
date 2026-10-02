@@ -13,6 +13,7 @@ import * as errorListener from './error-listener.tests.js'
 import * as pendingStructs from './pending-structs.tests.js'
 import * as corruptRow from './corrupt-row.tests.js'
 import * as snapshotErrors from './snapshot-errors.tests.js'
+import * as peerDeps from './peer-deps.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -36,7 +37,8 @@ runTests({
   errorListener,
   pendingStructs,
   corruptRow,
-  snapshotErrors
+  snapshotErrors,
+  peerDeps
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

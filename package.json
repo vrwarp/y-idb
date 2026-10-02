@@ -83,11 +83,11 @@
     "standard": "^17.1.0",
     "typescript": "^5.0.4",
     "y-protocols": "^1.0.1",
-    "yjs": "^13.4.7"
+    "yjs": "^13.5.0"
   },
   "peerDependencies": {
     "lib0": "^0.2.74",
-    "yjs": "^13.0.0"
+    "yjs": "^13.5.0"
   },
   "engines": {
     "npm": ">=8.0.0",
