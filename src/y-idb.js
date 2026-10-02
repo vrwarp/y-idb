@@ -122,6 +122,13 @@ const emitIsolated = (observable, name, args) => {
  * Apply rows read from the updates store. They are applied with origin ===
  * idbPersistence, so _storeUpdate does not write them back.
  *
+ * Each row is applied on its own: one undecodable row (storage corruption,
+ * a buggy writer, a bad writeSnapshot payload) would otherwise abort the
+ * batch, leaving the rows after it unloaded and the read cursor in front of
+ * it, so every later load and trim would throw on it again. Skipped rows
+ * are reported via 'error' and make the next trim a full consolidation,
+ * which deletes them.
+ *
  * A remote update whose dependencies are missing is parked by Yjs in
  * doc.store.pendingStructs / pendingDs without an 'update' event, so it was
  * never queued. A loaded row (e.g. written by another tab) can supply the
@@ -140,9 +147,23 @@ const applyStoredUpdates = (idbPersistence, rows) => {
     if (pendingDs) idbPersistence._pendingUpdates.push(Y.convertUpdateFormatV2ToV1(pendingDs))
     idbPersistence._scheduleFlush()
   }
+  /** @type {Array<any>} */
+  const errors = []
   Y.transact(doc, () => {
-    rows.forEach(val => Y.applyUpdate(doc, val))
+    rows.forEach(val => {
+      try {
+        Y.applyUpdate(doc, val)
+      } catch (err) {
+        errors.push(err)
+      }
+    })
   }, idbPersistence, false)
+  if (errors.length > 0) {
+    idbPersistence._hasCorruptRows = true
+    // Isolated: the caller still has to finish loading (or trimming), which
+    // a throwing listener must not cut short.
+    errors.forEach(err => emitIsolated(idbPersistence, 'error', [err]))
+  }
 }
 
 /**
@@ -274,8 +295,9 @@ const _storeState = (idbPersistence, forceStore) => {
          * Full consolidation (legacy behavior): one row holding
          * Y.encodeStateAsUpdate(doc) — O(document) CPU and write, so the
          * tiered path below reserves it for when delta rows have piled up.
-         * The doc covers every stored row here: rows below prevDbref were
-         * applied during hydration/earlier fetches, newer ones just above.
+         * The doc covers every decodable stored row here: rows below
+         * prevDbref were applied during hydration/earlier fetches, newer
+         * ones just above.
          * @return {Promise<any>}
          */
         const fullConsolidation = () => {
@@ -284,6 +306,8 @@ const _storeState = (idbPersistence, forceStore) => {
             .then(key => {
               if (idbPersistence._destroyed) return
               idbPersistence._dbref = key + 1
+              // The delete below drops every older row, corrupt ones too.
+              idbPersistence._hasCorruptRows = false
               return idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(key, true))
                 .then(() => idb.put(customStore, /** @type {any} */ ({
                   baseKey: key,
@@ -302,8 +326,9 @@ const _storeState = (idbPersistence, forceStore) => {
         }
 
         // No bookkeeping yet (fresh or legacy database) — establish the
-        // base row with a full consolidation.
-        if (forceStore || trimState === undefined || typeof trimState.lastSegKey !== 'number') {
+        // base row with a full consolidation. Same when a row failed to
+        // decode: it may sit outside the tail an incremental trim folds.
+        if (forceStore || idbPersistence._hasCorruptRows || trimState === undefined || typeof trimState.lastSegKey !== 'number') {
           return fullConsolidation()
         }
 
@@ -527,6 +552,11 @@ export class IndexeddbPersistence extends Observable {
     this.name = name
     this._dbref = 0
     this._dbsize = 0
+    /**
+     * Set when a stored row failed to decode; cleared by the full
+     * consolidation that deletes it.
+     */
+    this._hasCorruptRows = false
     this._trimSegmentRows = trimSegmentRows
     this._trimFullCompactBytes = trimFullCompactBytes
     this._destroyed = false

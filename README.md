@@ -106,7 +106,10 @@ The "error" event is fired when a database transaction or operation fails
 (e.g. QuotaExceededError, aborted transaction). Failed update batches are
 kept in memory and retried; while the database keeps failing, unwritten
 updates accumulate in memory until a write succeeds or the provider is
-destroyed.
+destroyed. A stored update row that cannot be decoded (storage corruption,
+a bad <code>writeSnapshot</code> payload) is skipped and reported here; the
+remaining content still loads, "synced" still fires, and the next trim
+consolidates fully, deleting the bad row.
   </dd>
   <dt><b><code>provider.on('retry-exhausted', function(error: Error))</code></b></dt>
   <dd>

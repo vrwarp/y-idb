@@ -482,7 +482,7 @@ provider.on('synced', () => {
 
         <div class="api-entry">
           <div class="api-sig">provider.on('error', (err: Error) => void)</div>
-          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update.</p>
+          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update. A stored update row that cannot be decoded is skipped and reported here; the remaining content still loads, <code>synced</code> still fires, and the next trim consolidates fully, deleting the bad row.</p>
         </div>
 
         <div class="api-entry">
