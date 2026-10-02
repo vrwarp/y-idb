@@ -39,6 +39,31 @@ const transactWrite = (idbPersistence, work) => {
 }
 
 /**
+ * `_dbref` and `_dbsize` are advanced from request callbacks, before the
+ * transaction commits. If it aborts instead (a failed request, or a
+ * QuotaExceededError / background kill at commit), IndexedDB discards its
+ * rows AND reverts the autoIncrement key generator, so the next row any tab
+ * writes re-uses a key this provider already counts as applied: it would
+ * never be fetched, and the next full consolidation would delete it.
+ * Restore the values the transaction started from.
+ *
+ * Call it from the transaction's first request callback: every earlier
+ * transaction on the store has finished by then (and run its own restore),
+ * so the snapshot holds committed values only.
+ *
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {IDBTransaction} tx
+ */
+const restoreCursorOnAbort = (idbPersistence, tx) => {
+  const dbref = idbPersistence._dbref
+  const dbsize = idbPersistence._dbsize
+  tx.addEventListener('abort', () => {
+    idbPersistence._dbref = dbref
+    idbPersistence._dbsize = dbsize
+  })
+}
+
+/**
  * @param {IndexeddbPersistence} idbPersistence
  * @param {function(IDBObjectStore):any} [beforeApplyUpdatesCallback]
  * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
@@ -55,6 +80,8 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
   const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName], 'readwrite')
   return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false)).then(updates => {
     if (idbPersistence._destroyed) return
+    // getLastKey below can return the uncommitted initial-state row.
+    restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
     if (beforeApplyUpdatesCallback) beforeApplyUpdatesCallback(updatesStore)
     Y.transact(idbPersistence.doc, () => {
       updates.forEach(val => Y.applyUpdate(idbPersistence.doc, val))
@@ -146,6 +173,8 @@ const _storeState = (idbPersistence, forceStore) => {
   // written by another tab.
   return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(prevDbref, false)).then(newRows => {
     if (idbPersistence._destroyed) return
+    // The trims below advance _dbref past their own, uncommitted row.
+    restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
     Y.transact(idbPersistence.doc, () => {
       newRows.forEach(val => Y.applyUpdate(idbPersistence.doc, val))
     }, idbPersistence, false)

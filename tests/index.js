@@ -1,6 +1,7 @@
 import * as indexeddb from './y-idb.tests.js'
 import * as destroyBeforeOpen from './destroy-before-open.tests.js'
 import * as hydrationInitstate from './hydration-initstate.tests.js'
+import * as dbrefAbort from './dbref-abort.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -12,7 +13,8 @@ if (isBrowser) {
 runTests({
   indexeddb,
   destroyBeforeOpen,
-  hydrationInitstate
+  hydrationInitstate,
+  dbrefAbort
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
