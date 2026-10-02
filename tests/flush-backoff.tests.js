@@ -7,10 +7,10 @@ import * as t from 'lib0/testing.js'
 /**
  * flush() must back off between attempts even once automatic retries are
  * exhausted. With `maxRetries: 0` every failed attempt exhausts immediately,
- * so `_onFlushFailed` arms no backoff timer; flush() used to call `_flush()`
- * again straight away, looping through microtasks only. That starved every
- * timer — including the deadline the README tells callers to race flush()
- * against — for as long as the database kept failing.
+ * and `_onFlushFailed` then armed no backoff timer; flush() used to call
+ * `_flush()` again straight away, looping through microtasks only. That
+ * starved every timer — including the deadline the README tells callers to
+ * race flush() against — for as long as the database kept failing.
  *
  * The runner here fails a bounded number of times, so the old microtask loop
  * eventually succeeds and resolves flush() before any timer fires: the test

@@ -33,6 +33,15 @@ export const MIN_FULL_COMPACT_BYTES = 1_048_576
 const MAX_TRIM_BACKOFF_EXPONENT = 8
 
 /**
+ * Cap on the backoff between automatic flush retries. It keeps doubling past
+ * `maxRetries` (when 'retry-exhausted' is emitted) up to this, and stays
+ * there until a write commits: every attempt offers the whole backlog, so
+ * retrying any faster while the database keeps failing makes the work grow
+ * quadratically with the length of the failure.
+ */
+export const MAX_RETRY_BACKOFF_MS = 30_000
+
+/**
  * IDB request to promise. Used instead of lib0's request wrappers, which
  * reject with `new Error(domException)` (name 'Error', the real name folded
  * into the message) or, for cursors, with the raw error Event. This rejects
@@ -677,6 +686,8 @@ export class IndexeddbPersistence extends Observable {
    * @param {<T>(work: () => Promise<T>) => Promise<T>} [opts.transactionRunner]
    * @param {number} [opts.maxRetries] Number of times a failed write is
    * retried with exponential backoff before 'retry-exhausted' is emitted.
+   * Retrying then continues, the backoff capped at MAX_RETRY_BACKOFF_MS,
+   * until a write commits.
    * @param {number} [opts.trimSegmentRows] Maximum delta rows the tiered
    * trim accumulates before forcing a full consolidation.
    * @param {number} [opts.trimFullCompactBytes] Delta-row byte budget
@@ -700,6 +711,11 @@ export class IndexeddbPersistence extends Observable {
     this.writeDebounceMs = writeDebounceMs
     this.durability = durability
     this.transactionRunner = transactionRunner
+    /**
+     * Failed flush attempts since a write last committed. Above
+     * `_maxRetries` once retries are exhausted: it is not reset until a
+     * write commits, so the backoff stays at its cap meanwhile.
+     */
     this._retryCount = 0
     this._maxRetries = maxRetries
     /**
@@ -965,6 +981,15 @@ export class IndexeddbPersistence extends Observable {
         tx.oncomplete = () => {
           this._dbsize += batch.length
           advanceCursorPastOwnRows(this, requests)
+          // Writes work again: end a failure episode, as a flush commit
+          // does, instead of leaving updates that arrived meanwhile to a
+          // backoff of up to MAX_RETRY_BACKOFF_MS.
+          this._retryCount = 0
+          if (this._retryTimeoutId !== null) {
+            clearTimeout(this._retryTimeoutId)
+            this._retryTimeoutId = null
+            this._scheduleFlush()
+          }
           settle()
         }
         let handled = false
@@ -1035,7 +1060,12 @@ export class IndexeddbPersistence extends Observable {
 
   /**
    * Recover from a failed flush attempt: re-buffer the batch, surface the
-   * error, and schedule a retry with exponential backoff.
+   * error, and schedule a retry with exponential backoff, capped at
+   * MAX_RETRY_BACKOFF_MS. 'retry-exhausted' is emitted once `maxRetries`
+   * retries have failed, once per failure episode; the retries go on at the
+   * capped backoff. Restarting the short retry cycle on the next update
+   * instead would retry every couple of seconds while the app keeps
+   * editing, each attempt re-adding the whole backlog.
    *
    * @param {Array<Uint8Array>} batch
    * @param {any} err
@@ -1051,14 +1081,14 @@ export class IndexeddbPersistence extends Observable {
     emitIsolated(this, 'error', [err])
     if (!this._destroyed) {
       this._retryCount++
-      if (this._retryCount <= this._maxRetries) {
-        const backoff = Math.pow(2, this._retryCount) * 100
-        this._retryTimeoutId = setTimeout(() => {
-          this._retryTimeoutId = null
-          this._scheduleFlush()
-        }, backoff)
-      } else {
-        this._retryCount = 0
+      const backoff = Math.min(Math.pow(2, this._retryCount) * 100, MAX_RETRY_BACKOFF_MS)
+      this._retryTimeoutId = setTimeout(() => {
+        this._retryTimeoutId = null
+        this._scheduleFlush()
+      }, backoff)
+      // After arming the retry: a listener that destroys the provider then
+      // clears it.
+      if (this._retryCount === this._maxRetries + 1) {
         emitIsolated(this, 'retry-exhausted', [err || new Error('Retry exhausted')])
       }
     }
@@ -1233,9 +1263,11 @@ export class IndexeddbPersistence extends Observable {
    * same way. Resolves immediately when idle.
    *
    * While a backoff retry is armed after a failed flush, this waits for the
-   * scheduled retry instead of hot-spinning a failing transaction; on
-   * persistent failure it keeps retrying like the internal machinery does,
-   * so callers that need a bound should race it against a deadline.
+   * scheduled retry instead of hot-spinning a failing transaction. Once
+   * retries are exhausted it does not wait out the capped backoff (up to
+   * MAX_RETRY_BACKOFF_MS) but retries on a short backoff of its own. On
+   * persistent failure it keeps retrying, so callers that need a bound
+   * should race it against a deadline.
    *
    * A debounce timer that is already scheduled is left to fire: its
    * `_flush()` no-ops once the queue has been drained here.
@@ -1246,15 +1278,16 @@ export class IndexeddbPersistence extends Observable {
     await this._db
     let exhaustedFailures = 0
     /**
-     * Once retries are exhausted (always, with `maxRetries: 0`) a failed
-     * attempt arms no backoff timer, so retrying at once would loop through
-     * microtasks only — starving every timer, including the deadline callers
-     * race flush() against. Back off as the automatic retries do instead.
+     * Once retries are exhausted (at the first failure with `maxRetries:
+     * 0`) this loop does not wait for the armed retry (see below), so
+     * retrying at once would loop through microtasks only — starving every
+     * timer, including the deadline callers race flush() against. Back off
+     * as the automatic retries do before exhaustion instead.
      *
      * @param {number} failedBefore `_failedFlushes` before the attempt
      */
     const backOffIfExhausted = async failedBefore => {
-      if (this._failedFlushes === failedBefore || this._retryTimeoutId !== null || this._destroyed) return
+      if (this._failedFlushes === failedBefore || this._retryCount <= this._maxRetries || this._destroyed) return
       exhaustedFailures++
       const backoff = Math.pow(2, Math.min(exhaustedFailures, 5)) * 100
       await new Promise(resolve => setTimeout(resolve, backoff))
@@ -1278,11 +1311,18 @@ export class IndexeddbPersistence extends Observable {
       }
       if (this._destroyed || this._pendingUpdates.length === 0) return
       if (this._retryTimeoutId !== null) {
-        // A backoff retry is armed (see `_onFlushFailed`) — wait for its
-        // `_scheduleFlush` to fire rather than bypassing the backoff by
-        // calling `_flush()` directly (which does not check the timer).
-        await new Promise(resolve => setTimeout(resolve, 50))
-        continue
+        if (this._retryCount <= this._maxRetries) {
+          // A backoff retry is armed (see `_onFlushFailed`) — wait for its
+          // `_scheduleFlush` to fire rather than bypassing the backoff by
+          // calling `_flush()` directly (which does not check the timer).
+          await new Promise(resolve => setTimeout(resolve, 50))
+          continue
+        }
+        // Retries are exhausted, so the armed retry may be up to
+        // MAX_RETRY_BACKOFF_MS away: attempt now, paced by
+        // backOffIfExhausted. A failed attempt re-arms the retry.
+        clearTimeout(this._retryTimeoutId)
+        this._retryTimeoutId = null
       }
       const failedBefore = this._failedFlushes
       this._flush()

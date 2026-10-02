@@ -815,7 +815,7 @@ export const testRetryExhaustedEvent = async tc => {
   // 3. Wait for 400ms backoff timeout + microtask to run the next flush
   await promise.wait(450)
   t.assert(typeof mockTx.onerror === 'function')
-  if (mockTx.onerror) mockTx.onerror() // retryCount becomes 3 > 2 (exhausted), emits event, resets to 0
+  if (mockTx.onerror) mockTx.onerror() // retryCount becomes 3 > 2 (exhausted), emits event, keeps retrying (800ms)
 
   t.assert(retryExhaustedCount === 1)
   t.assert(lastError instanceof Error)

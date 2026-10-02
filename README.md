@@ -105,7 +105,13 @@ stores to prevent WebKit (Safari) transaction deadlocks/hangs.
 An optional <code>options.maxRetries</code> (default <code>5</code>) controls
 how often a failed write is retried with exponential backoff
 (200ms, 400ms, 800ms, ...) before the <code>retry-exhausted</code> event is
-emitted.
+emitted. Retrying then continues until a write succeeds, with the backoff
+capped at 30 s (<code>MAX_RETRY_BACKOFF_MS</code>). Every attempt offers the
+whole in-memory backlog, so retrying on a short cycle while the database
+keeps failing and the app keeps editing would make the work grow
+quadratically with the length of the failure; at the cap it is about 2
+attempts a minute. Any successful write (a flush, or the page-hide write)
+ends the failure episode and resets the backoff.
   </dd>
   <dt><b><code>provider.whenSynced: Promise&lt;IndexeddbPersistence&gt;</code></b></dt>
   <dd>
@@ -138,7 +144,9 @@ consolidates fully, deleting the bad row.
   <dd>
 The "retry-exhausted" event is fired when the write retry count has exceeded
 the configured <code>maxRetries</code> limit (5 by default) after persistent
-database transaction failures.
+database transaction failures. It fires once per failure episode: the
+provider keeps retrying at the capped backoff (and keeps emitting "error"
+for each failed attempt) until a write succeeds.
   </dd>
   <dt><b><code>provider.set(key: any, value: any): Promise&lt;any&gt;</code></b></dt>
   <dd>
@@ -161,9 +169,11 @@ Force-drain the buffered update queue immediately, bypassing the
 (including any that arrive while a write is in flight) has been committed, or
 immediately when the queue is idle. While a write keeps failing it backs off
 between attempts rather than hot-spinning: it waits for the scheduled backoff
-retry, or, once retries are exhausted (always with <code>maxRetries: 0</code>),
-for the same exponential backoff of its own. Callers that need a time bound
-should race it against a deadline.
+retry until retries are exhausted (at the first failure with
+<code>maxRetries: 0</code>); after that it does not wait out the capped
+backoff but attempts at once and then on an exponential backoff of its own
+(200ms doubling to 3.2s). Callers that need a time bound should race it
+against a deadline.
   </dd>
   <dt><b><code>provider.destroy(): Promise</code></b></dt>
   <dd>
