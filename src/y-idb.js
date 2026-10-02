@@ -119,6 +119,33 @@ const emitIsolated = (observable, name, args) => {
 }
 
 /**
+ * Apply rows read from the updates store. They are applied with origin ===
+ * idbPersistence, so _storeUpdate does not write them back.
+ *
+ * A remote update whose dependencies are missing is parked by Yjs in
+ * doc.store.pendingStructs / pendingDs without an 'update' event, so it was
+ * never queued. A loaded row (e.g. written by another tab) can supply the
+ * missing dependency, and Yjs then integrates the parked update inside this
+ * transaction — under our origin. Queue the parked bytes first (Yjs keeps
+ * them V2-encoded) so everything the load integrates is persisted.
+ *
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {Array<Uint8Array>} rows
+ */
+const applyStoredUpdates = (idbPersistence, rows) => {
+  const doc = idbPersistence.doc
+  const { pendingStructs, pendingDs } = doc.store
+  if (rows.length > 0 && (pendingStructs || pendingDs)) {
+    if (pendingStructs) idbPersistence._pendingUpdates.push(Y.convertUpdateFormatV2ToV1(pendingStructs.update))
+    if (pendingDs) idbPersistence._pendingUpdates.push(Y.convertUpdateFormatV2ToV1(pendingDs))
+    idbPersistence._scheduleFlush()
+  }
+  Y.transact(doc, () => {
+    rows.forEach(val => Y.applyUpdate(doc, val))
+  }, idbPersistence, false)
+}
+
+/**
  * @param {IndexeddbPersistence} idbPersistence
  * @param {function(IDBObjectStore):any} [beforeApplyUpdatesCallback]
  * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
@@ -138,9 +165,7 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
     // getLastKey below can return the uncommitted initial-state row.
     restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
     if (beforeApplyUpdatesCallback) beforeApplyUpdatesCallback(updatesStore)
-    Y.transact(idbPersistence.doc, () => {
-      updates.forEach(val => Y.applyUpdate(idbPersistence.doc, val))
-    }, idbPersistence, false)
+    applyStoredUpdates(idbPersistence, updates)
     if (afterApplyUpdatesCallback) afterApplyUpdatesCallback(updatesStore)
   })
     .then(() => {
@@ -230,9 +255,7 @@ const _storeState = (idbPersistence, forceStore) => {
     if (idbPersistence._destroyed) return
     // The trims below advance _dbref past their own, uncommitted row.
     restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
-    Y.transact(idbPersistence.doc, () => {
-      newRows.forEach(val => Y.applyUpdate(idbPersistence.doc, val))
-    }, idbPersistence, false)
+    applyStoredUpdates(idbPersistence, newRows)
     return idb.count(updatesStore).then(cnt => {
       if (idbPersistence._destroyed) return
       idbPersistence._dbsize = cnt

@@ -10,6 +10,7 @@ import * as hydrationError from './hydration-error.tests.js'
 import * as unloadWrite from './unload-write.tests.js'
 import * as errorPayload from './error-payload.tests.js'
 import * as errorListener from './error-listener.tests.js'
+import * as pendingStructs from './pending-structs.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -30,7 +31,8 @@ runTests({
   hydrationError,
   unloadWrite,
   errorPayload,
-  errorListener
+  errorListener,
+  pendingStructs
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
