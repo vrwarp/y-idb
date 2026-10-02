@@ -97,6 +97,10 @@ emitted.
 A promise that resolves once the initial content has been loaded from the
 database (i.e. when the "synced" event fires). Note: if the provider is
 destroyed before the initial sync completes, this promise never settles.
+The stored rows are applied in one transaction. While the provider is the
+doc's only <code>'update'</code> listener (e.g. a network provider is created
+after <code>whenSynced</code>), it keeps Yjs from encoding that transaction
+into a document-sized update that it would only discard.
   </dd>
   <dt><b><code>provider.on('synced', function(idbPersistence: IndexeddbPersistence))</code></b></dt>
   <dd>

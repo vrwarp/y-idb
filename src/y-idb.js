@@ -150,6 +150,15 @@ const emitIsolated = (observable, name, args) => {
 }
 
 /**
+ * The doc's 'update' listeners, or undefined when there are none or lib0's
+ * Observable internals are not what we expect.
+ *
+ * @param {Y.Doc} doc
+ * @return {Set<function(...any):any>|undefined}
+ */
+const updateListeners = doc => doc._observers instanceof Map ? doc._observers.get('update') : undefined
+
+/**
  * Apply rows read from the updates store. They are applied with origin ===
  * idbPersistence, so _storeUpdate does not write them back.
  *
@@ -167,6 +176,15 @@ const emitIsolated = (observable, name, args) => {
  * transaction — under our origin. Queue the parked bytes first (Yjs keeps
  * them V2-encoded) so everything the load integrates is persisted.
  *
+ * Yjs encodes an update for every transaction while the doc has an 'update'
+ * listener. For this transaction that update is as large as everything
+ * loaded, and _storeUpdate drops it (origin === idbPersistence). So when
+ * _storeUpdate is the only listener it is detached while the rows are
+ * applied. Yjs emits the 'update' of a transaction an observer starts during
+ * the cleanup before Y.transact returns, so the next transaction's
+ * 'beforeTransaction' re-attaches it first: writes made in reaction to the
+ * load are still persisted.
+ *
  * @param {IndexeddbPersistence} idbPersistence
  * @param {Array<Uint8Array>} rows
  */
@@ -178,17 +196,42 @@ const applyStoredUpdates = (idbPersistence, rows) => {
     if (pendingDs) idbPersistence._pendingUpdates.push(Y.convertUpdateFormatV2ToV1(pendingDs))
     idbPersistence._scheduleFlush()
   }
+  const storeUpdate = idbPersistence._storeUpdate
+  const listeners = updateListeners(doc)
+  // Nested in another transaction there is nothing to save: that one's
+  // update is encoded after we return.
+  let detached = rows.length > 0 && doc._transaction === null &&
+    listeners !== undefined && listeners.size === 1 && listeners.has(storeUpdate)
+  const reattach = () => {
+    if (!detached) return
+    detached = false
+    doc.off('beforeTransaction', reattach)
+    // destroy() (maybe called by an observer meanwhile) detached it for good.
+    if (idbPersistence._destroyed) return
+    // Put it back first, where it was: an observer may have added listeners.
+    const added = Array.from(updateListeners(doc) || [])
+    added.forEach(f => doc.off('update', f))
+    doc.on('update', storeUpdate)
+    added.forEach(f => doc.on('update', f))
+  }
+  if (detached) doc.off('update', storeUpdate)
   /** @type {Array<any>} */
   const errors = []
-  Y.transact(doc, () => {
-    rows.forEach(val => {
-      try {
-        Y.applyUpdate(doc, val)
-      } catch (err) {
-        errors.push(err)
-      }
-    })
-  }, idbPersistence, false)
+  try {
+    Y.transact(doc, () => {
+      // Registered in here so it fires for the next transaction, not this one.
+      if (detached) doc.on('beforeTransaction', reattach)
+      rows.forEach(val => {
+        try {
+          Y.applyUpdate(doc, val)
+        } catch (err) {
+          errors.push(err)
+        }
+      })
+    }, idbPersistence, false)
+  } finally {
+    reattach()
+  }
   if (errors.length > 0) {
     idbPersistence._hasCorruptRows = true
     // Isolated: the caller still has to finish loading (or trimming), which
