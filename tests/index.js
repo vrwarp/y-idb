@@ -18,6 +18,7 @@ import * as lifecycleRunner from './lifecycle-runner.tests.js'
 import * as destroyTimers from './destroy-timers.tests.js'
 import * as flushBackoff from './flush-backoff.tests.js'
 import * as hydrationEncode from './hydration-encode.tests.js'
+import * as trimOwnRows from './trim-own-rows.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -46,7 +47,8 @@ runTests({
   lifecycleRunner,
   destroyTimers,
   flushBackoff,
-  hydrationEncode
+  hydrationEncode,
+  trimOwnRows
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

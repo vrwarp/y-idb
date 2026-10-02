@@ -113,6 +113,32 @@ const restoreCursorOnAbort = (idbPersistence, tx) => {
 }
 
 /**
+ * Move `_dbref` past a batch of rows this provider has just written itself
+ * (buffered doc updates, already in the doc), so the next trim's catch-up
+ * read does not fetch and re-apply them.
+ *
+ * Call it from the transaction's 'complete' handler only, never from a
+ * request callback: an aborted transaction discards its rows and reverts
+ * the key generator, so another tab re-uses their keys (see
+ * restoreCursorOnAbort).
+ *
+ * The adds of one readwrite transaction get consecutive autoIncrement keys
+ * (no other transaction on the store runs in between), so a first key equal
+ * to `_dbref` proves no unseen row sits between the rows already applied
+ * and the batch. Otherwise (another tab wrote first, or the key generator
+ * is ahead of `_dbref`, e.g. on a fresh store whose keys start at 1)
+ * `_dbref` stays put and the next trim reads the batch again.
+ *
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {Array<IDBRequest<IDBValidKey>>} requests The batch's add() requests, in order
+ */
+const advanceCursorPastOwnRows = (idbPersistence, requests) => {
+  if (requests.length > 0 && requests[0].result === idbPersistence._dbref) {
+    idbPersistence._dbref = /** @type {number} */ (requests[requests.length - 1].result) + 1
+  }
+}
+
+/**
  * The error that failed `tx`, for its `error`/`abort` handlers. A failing
  * request's bubbling 'error' event reaches the transaction BEFORE the abort
  * steps set `tx.error`, so fall back to the error of the request the event
@@ -370,8 +396,8 @@ const _storeState = (idbPersistence, forceStore) => {
          * Y.encodeStateAsUpdate(doc) — O(document) CPU and write, so the
          * tiered path below reserves it for when delta rows have piled up.
          * The doc covers every decodable stored row here: rows below
-         * prevDbref were applied during hydration/earlier fetches, newer
-         * ones just above.
+         * prevDbref were applied during hydration/earlier fetches or
+         * written by this provider, newer ones just above.
          * @return {Promise<any>}
          */
         const fullConsolidation = () => {
@@ -409,8 +435,9 @@ const _storeState = (idbPersistence, forceStore) => {
         // Incremental trim: fold every row after the last fold boundary
         // into ONE delta row — O(new updates), no document re-encode. Rows
         // between lastSegKey and prevDbref may predate this session
-        // (leftover tail from an earlier run); they were applied to the
-        // doc during hydration, but still need folding, so read them here.
+        // (leftover tail from an earlier run) or be this provider's own
+        // flushed rows; they are already in the doc, but still need
+        // folding, so read them here.
         return getAllKeysValues(updatesStore, idb.createIDBKeyRangeLowerBound(trimState.lastSegKey, true)).then(tail => {
           if (idbPersistence._destroyed) return
           if (tail.length === 0) {
@@ -900,11 +927,10 @@ export class IndexeddbPersistence extends Observable {
       try {
         const tx = this.db.transaction([updatesStoreName], 'readwrite')
         const store = tx.objectStore(updatesStoreName)
-        for (let i = 0; i < batch.length; i++) {
-          store.add(batch[i])
-        }
+        const requests = batch.map(update => store.add(update))
         tx.oncomplete = () => {
           this._dbsize += batch.length
+          advanceCursorPastOwnRows(this, requests)
           settle()
         }
         let handled = false
@@ -1061,13 +1087,12 @@ export class IndexeddbPersistence extends Observable {
         return
       }
       const store = tx.objectStore(updatesStoreName)
-      for (let i = 0; i < batch.length; i++) {
-        store.add(batch[i])
-      }
+      const requests = batch.map(update => store.add(update))
       tx.oncomplete = () => {
         concluded = true
         this._retryCount = 0
         this._dbsize += batch.length
+        advanceCursorPastOwnRows(this, requests)
         this._writing = false
         this._flushPromise = null
         if (this._pendingUpdates.length > 0) {
