@@ -504,6 +504,12 @@ export class IndexeddbPersistence extends Observable {
     this._writing = false
     this._flushScheduled = false
     /**
+     * Page-hide writes still in flight (see `_unloadListener`). They bypass
+     * the flusher, so flush() and destroy() wait for them separately.
+     * @type {Set<Promise<void>>}
+     */
+    this._unloadWrites = new Set()
+    /**
      * @type {IDBDatabase|null}
      */
     this.db = null
@@ -664,28 +670,54 @@ export class IndexeddbPersistence extends Observable {
 
     this._unloadListener = () => {
       if (this.db && this._pendingUpdates.length > 0) {
+        // Captured up front: a listener running on an already destroyed
+        // instance drops the batch, but a write that fails while destroy()
+        // waits for it must hand the batch back for the final write.
+        const destroyed = this._destroyed
         // Hydration may not get to commit the initial state once the page
         // is gone; the buffered updates build on it, so write it with them.
         this._requeueInitialState()
         const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
+        /** @type {(value: void) => void} */
+        let resolveWrite = () => {}
+        const write = new Promise(resolve => { resolveWrite = resolve })
+        this._unloadWrites.add(write)
+        const settle = () => {
+          this._unloadWrites.delete(write)
+          resolveWrite()
+        }
+        /**
+         * @param {any} err
+         */
+        const onFailed = err => {
+          if (!destroyed) {
+            // Hand the batch back to the flusher, which owns retries: an
+            // in-flight flush picks it up when it settles, an armed backoff
+            // retry when it fires, otherwise the flush scheduled here does.
+            this._pendingUpdates = batch.concat(this._pendingUpdates)
+            this.emit('error', [err])
+            this._scheduleFlush()
+          }
+          settle()
+        }
         try {
           const tx = this.db.transaction([updatesStoreName], 'readwrite')
           const store = tx.objectStore(updatesStoreName)
           for (let i = 0; i < batch.length; i++) {
             store.add(batch[i])
           }
+          tx.oncomplete = () => {
+            this._dbsize += batch.length
+            settle()
+          }
           let handled = false
           tx.onerror = tx.onabort = () => {
             if (handled) return
             handled = true
-            if (!this._destroyed) {
-              this._pendingUpdates = batch.concat(this._pendingUpdates)
-            }
+            onFailed(tx.error)
           }
         } catch (e) {
-          if (!this._destroyed) {
-            this._pendingUpdates = batch.concat(this._pendingUpdates)
-          }
+          onFailed(e)
         }
       }
     }
@@ -894,7 +926,8 @@ export class IndexeddbPersistence extends Observable {
    * in-flight transaction commit (the existing `_flushPromise` resolves in
    * the transaction's `oncomplete`/`onerror`), and loops until
    * `_pendingUpdates` is empty with no flush in flight — updates that arrive
-   * mid-flush are drained too. Resolves immediately when idle.
+   * mid-flush are drained too. A page-hide write in flight is awaited the
+   * same way. Resolves immediately when idle.
    *
    * While a backoff retry is armed after a failed flush, this waits for the
    * scheduled retry instead of hot-spinning a failing transaction; on
@@ -915,6 +948,12 @@ export class IndexeddbPersistence extends Observable {
       // re-await a settled promise in a loop that starves the event loop.
       if (this._writing) {
         await (this._flushPromise || new Promise(resolve => setTimeout(resolve, 10)))
+        continue
+      }
+      // A page-hide write took the queue into its own transaction — wait for
+      // it too. If it failed, its batch is back in the queue.
+      if (this._unloadWrites.size > 0) {
+        await Promise.all(this._unloadWrites)
         continue
       }
       if (this._destroyed || this._pendingUpdates.length === 0) return
@@ -956,11 +995,12 @@ export class IndexeddbPersistence extends Observable {
       document.removeEventListener('visibilitychange', this._visibilityListener)
     }
 
-    // Wait for an in-flight flush to settle before writing the remaining
-    // pending updates: if that flush fails it re-buffers its batch into
-    // _pendingUpdates, so snapshotting the queue only afterwards guarantees
-    // the failed batch is included in the final write instead of lost.
-    const activeFlushPromise = (this._flushPromise || Promise.resolve()).then(() => {}, () => {})
+    // Wait for an in-flight flush and any page-hide writes to settle before
+    // writing the remaining pending updates: if one fails it re-buffers its
+    // batch into _pendingUpdates, so snapshotting the queue only afterwards
+    // guarantees the failed batch is included in the final write instead of
+    // lost.
+    const activeFlushPromise = Promise.all([this._flushPromise, ...this._unloadWrites]).then(() => {}, () => {})
     this._destroyPromise = activeFlushPromise
       // Before the connection opens no flush can be in flight and `this.db`
       // is still null, so the final write below would be skipped. Wait for
