@@ -26,6 +26,13 @@ export const MAX_SEGMENT_ROWS = 24
 export const MIN_FULL_COMPACT_BYTES = 1_048_576
 
 /**
+ * While trims keep failing, the trim a flush arms waits `_storeTimeout` *
+ * 2^failures instead of `_storeTimeout`, with the exponent capped here:
+ * at most 256 s (about 4 minutes) for the default 1 s timeout.
+ */
+const MAX_TRIM_BACKOFF_EXPONENT = 8
+
+/**
  * IDB request to promise. Used instead of lib0's request wrappers, which
  * reject with `new Error(domException)` (name 'Error', the real name folded
  * into the message) or, for cursors, with the raw error Event. This rejects
@@ -357,19 +364,27 @@ const trimStateKey = '__yidb_trim_v1'
 /**
  * @param {IndexeddbPersistence} idbPersistence
  * @param {boolean} forceStore
+ * @param {function(IDBTransaction):void} [onTransaction] Called with the
+ * trim transaction as soon as it is created.
  * @return {Promise<any>}
  */
-const _storeState = (idbPersistence, forceStore) => {
+const _storeState = (idbPersistence, forceStore, onTransaction) => {
   if (idbPersistence._destroyed) return promise.resolve()
   if (!idbPersistence.db) {
     return idbPersistence._db.then(db => {
       idbPersistence.db = db
-      return _storeState(idbPersistence, forceStore)
+      return _storeState(idbPersistence, forceStore, onTransaction)
     })
   }
   const db = /** @type {IDBDatabase} */ (idbPersistence.db)
   const prevDbref = idbPersistence._dbref
   const [updatesStore, customStore] = idb.transact(db, [updatesStoreName, customStoreName], 'readwrite')
+  // Any committed trim, explicit ones included, ends the backoff of failed
+  // ones (see `_trim`).
+  updatesStore.transaction.addEventListener('complete', () => {
+    idbPersistence._trimFailures = 0
+  })
+  if (onTransaction) onTransaction(updatesStore.transaction)
   // Fetch (and apply) rows we have not seen yet — they may have been
   // written by another tab.
   return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(prevDbref, false))).then(newRows => {
@@ -867,6 +882,12 @@ export class IndexeddbPersistence extends Observable {
      */
     this._storeTimeoutId = null
     /**
+     * Consecutive failed trims (see `_trim`). While non-zero, the trim a
+     * flush arms is delayed by exponential backoff instead of being retried
+     * `_storeTimeout` after every later flush.
+     */
+    this._trimFailures = 0
+    /**
      * @param {Uint8Array} update
      * @param {any} origin
      */
@@ -1100,25 +1121,17 @@ export class IndexeddbPersistence extends Observable {
         }
         // Schedule a compaction if none is pending yet. Don't reset a
         // pending timer: under sustained writes that would postpone the trim
-        // indefinitely and let the store grow without bound.
+        // indefinitely and let the store grow without bound. While trims
+        // keep failing (e.g. a QuotaExceededError at commit), back off
+        // instead of retrying after every flush: each attempt re-reads and
+        // re-applies the rows written since the last committed trim, and a
+        // full consolidation re-encodes the whole doc.
         if (!this._destroyed && this._dbsize >= PREFERRED_TRIM_SIZE && this._storeTimeoutId === null) {
+          const backoff = Math.pow(2, Math.min(this._trimFailures, MAX_TRIM_BACKOFF_EXPONENT))
           this._storeTimeoutId = setTimeout(() => {
             this._storeTimeoutId = null
-            // storeState can fail synchronously (transact on a closing db
-            // throws) or asynchronously — surface both via 'error' instead
-            // of an uncaught exception / unhandled rejection.
-            try {
-              storeState(this, false).catch(err => {
-                if (!this._destroyed) {
-                  this.emit('error', [err])
-                }
-              })
-            } catch (err) {
-              if (!this._destroyed) {
-                this.emit('error', [err])
-              }
-            }
-          }, this._storeTimeout)
+            this._trim()
+          }, this._storeTimeout * backoff)
         }
         onConcluded()
         resolve(undefined)
@@ -1155,6 +1168,45 @@ export class IndexeddbPersistence extends Observable {
     // could not be opened), which cleared `_flushPromise`.
     if (!concluded) {
       this._flushPromise = flushPromise
+    }
+  }
+
+  /**
+   * The trim a flush arms once the store holds PREFERRED_TRIM_SIZE rows.
+   * A failed attempt counts once towards `_trimFailures`, whether the
+   * transaction's 'abort' reports it (an abort at commit, e.g. a
+   * QuotaExceededError, does not reject: storeState resolves on the trim's
+   * last request) or the rejection does (a failing transactionRunner, a
+   * closing database; a failed request causes both). Only a committed trim
+   * resets it (see `_storeState`), not a successful flush.
+   */
+  _trim () {
+    let concluded = false
+    const onFailed = () => {
+      if (concluded) return
+      concluded = true
+      this._trimFailures++
+    }
+    /**
+     * @param {any} err
+     */
+    const onError = err => {
+      onFailed()
+      if (!this._destroyed) {
+        this.emit('error', [err])
+      }
+    }
+    // The trim can fail synchronously (transact on a closing db throws) or
+    // asynchronously — surface both via 'error' instead of an uncaught
+    // exception / unhandled rejection.
+    try {
+      transactWrite(this, () => _storeState(this, false, tx => {
+        // A transactionRunner may still reject after the commit.
+        tx.addEventListener('complete', () => { concluded = true })
+        tx.addEventListener('abort', onFailed)
+      })).catch(onError)
+    } catch (err) {
+      onError(err)
     }
   }
 

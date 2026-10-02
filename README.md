@@ -61,6 +61,17 @@ row's size) — bounding the database at roughly 2&times; the consolidated
 document size. Explicit <code>storeState(provider, true)</code> calls
 always consolidate fully.
 
+A trim that fails (e.g. with a <code>QuotaExceededError</code> when the
+origin is near its storage quota) backs off: until a trim commits, the
+next one waits 2 s, 4 s, 8 s, ... (at most 256 s) after the write that
+schedules it, instead of 1 s. Every attempt re-reads the rows written
+since the last committed trim and may re-encode the whole document; on an
+aged 1 MB document failing through 400 writes 5 s apart, the backoff
+makes that 14 attempts instead of 394, and 17 MB instead of 477 MB offered
+to IndexedDB when every trim is a full consolidation. It saves the work
+but frees no space. Explicit <code>storeState</code> calls are never
+delayed.
+
 An optional <code>options.writeDebounceMs</code> (default <code>0</code>, which
 coalesces writes on a microtask) can be supplied to debounce and aggregate
 updates. Document updates are batched and written by an internal flusher that
