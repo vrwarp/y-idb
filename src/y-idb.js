@@ -769,8 +769,24 @@ export class IndexeddbPersistence extends Observable {
     // the failed batch is included in the final write instead of lost.
     const activeFlushPromise = (this._flushPromise || Promise.resolve()).then(() => {}, () => {})
     this._destroyPromise = activeFlushPromise
+      // Before the connection opens no flush can be in flight and `this.db`
+      // is still null, so the final write below would be skipped. Wait for
+      // the connection: the constructor's `_db.then` callback is registered
+      // first, so it has assigned `this.db` by the time this resolves.
+      .then(() => this._db.then(() => {}, () => {}))
       .then(() => {
         const db = this.db
+        if (!this.synced) {
+          // The initial sync did not complete, so its initial-state write
+          // (see beforeApplyUpdatesCallback) may be missing, and updates made
+          // on top of that state (buffered or already flushed) would not
+          // decode without it. Write the whole doc state instead; it covers
+          // every buffered update.
+          const initUpdate = Y.encodeStateAsUpdate(this.doc)
+          if (initUpdate.length > 2) {
+            this._pendingUpdates = [initUpdate]
+          }
+        }
         if (db && this._pendingUpdates.length > 0) {
           const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
           return transactWrite(this, () => new Promise((resolve) => {

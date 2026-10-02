@@ -1,4 +1,5 @@
 import * as indexeddb from './y-idb.tests.js'
+import * as destroyBeforeOpen from './destroy-before-open.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -8,7 +9,8 @@ if (isBrowser) {
   log.createVConsole(document.body)
 }
 runTests({
-  indexeddb
+  indexeddb,
+  destroyBeforeOpen
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
