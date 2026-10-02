@@ -82,6 +82,23 @@ const restoreCursorOnAbort = (idbPersistence, tx) => {
 }
 
 /**
+ * The error that failed `tx`, for its `error`/`abort` handlers. A failing
+ * request's bubbling 'error' event reaches the transaction BEFORE the abort
+ * steps set `tx.error`, so fall back to the error of the request the event
+ * came from, and to a generic Error when neither is set (e.g. an explicit
+ * `abort()` with no pending requests).
+ *
+ * @param {IDBTransaction} tx
+ * @param {Event | undefined} event
+ * @param {string} message
+ * @return {Error}
+ */
+const transactionError = (tx, event, message) => {
+  const target = /** @type {IDBRequest | IDBTransaction | null} */ (event ? event.target : null)
+  return tx.error || (target && target.error) || new Error(message)
+}
+
+/**
  * @param {IndexeddbPersistence} idbPersistence
  * @param {function(IDBObjectStore):any} [beforeApplyUpdatesCallback]
  * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
@@ -367,9 +384,9 @@ export const readSnapshot = (name, { transactionRunner } = {}) => {
         resolve(Y.mergeUpdates(rows))
       }
     }
-    tx.onerror = tx.onabort = () => {
+    tx.onerror = tx.onabort = event => {
       db.close()
-      reject(tx.error || new Error('readSnapshot transaction failed'))
+      reject(transactionError(tx, event, 'readSnapshot transaction failed'))
     }
   }))
   return runTransaction(transactionRunner, work)
@@ -434,9 +451,9 @@ export const writeSnapshot = (name, update, { transactionRunner } = {}) => {
       db.close()
       resolve(undefined)
     }
-    tx.onerror = tx.onabort = () => {
+    tx.onerror = tx.onabort = event => {
       db.close()
-      reject(tx.error || new Error('writeSnapshot transaction failed'))
+      reject(transactionError(tx, event, 'writeSnapshot transaction failed'))
     }
   }))
   return runTransaction(transactionRunner, work)
@@ -711,10 +728,10 @@ export class IndexeddbPersistence extends Observable {
             settle()
           }
           let handled = false
-          tx.onerror = tx.onabort = () => {
+          tx.onerror = tx.onabort = event => {
             if (handled) return
             handled = true
-            onFailed(tx.error)
+            onFailed(transactionError(tx, event, 'page-hide write failed'))
           }
         } catch (e) {
           onFailed(e)
@@ -890,8 +907,11 @@ export class IndexeddbPersistence extends Observable {
       }
       // A failed transaction fires a bubbling 'error' event for every pending
       // request and then 'abort' — `onFailed` handles one failure once.
-      const onErrorOrAbort = () => {
-        onFailed(tx.error)
+      /**
+       * @param {Event} [event]
+       */
+      const onErrorOrAbort = event => {
+        onFailed(transactionError(tx, event, 'flush transaction failed'))
         resolve(undefined)
       }
       tx.onerror = onErrorOrAbort
@@ -1036,10 +1056,10 @@ export class IndexeddbPersistence extends Observable {
               }
               tx.oncomplete = () => resolve(undefined)
               let handled = false
-              tx.onerror = tx.onabort = () => {
+              tx.onerror = tx.onabort = event => {
                 if (!handled) {
                   handled = true
-                  this.emit('error', [tx.error])
+                  this.emit('error', [transactionError(tx, event, 'final flush transaction failed')])
                 }
                 resolve(undefined)
               }

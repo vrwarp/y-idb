@@ -8,6 +8,7 @@ import * as snapshotAtomicity from './snapshot-atomicity.tests.js'
 import * as openFailure from './open-failure.tests.js'
 import * as hydrationError from './hydration-error.tests.js'
 import * as unloadWrite from './unload-write.tests.js'
+import * as errorPayload from './error-payload.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -26,7 +27,8 @@ runTests({
   snapshotAtomicity,
   openFailure,
   hydrationError,
-  unloadWrite
+  unloadWrite,
+  errorPayload
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
