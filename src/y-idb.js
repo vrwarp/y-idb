@@ -440,16 +440,24 @@ export const readSnapshot = (name, { transactionRunner } = {}) => {
     const request = tx.objectStore(updatesStoreName).getAll()
     tx.oncomplete = () => {
       db.close()
-      /** @type {Array<Uint8Array>} */
-      const rows = (request.result || []).map(row =>
-        row instanceof Uint8Array ? row : new Uint8Array(row)
-      )
-      if (rows.length === 0) {
-        resolve(null)
-      } else if (rows.length === 1) {
-        resolve(rows[0])
-      } else {
-        resolve(Y.mergeUpdates(rows))
+      // This runs in an event handler, outside the promise executor: a row
+      // that cannot be merged (corrupt or foreign data) must reject here,
+      // or the error escapes as an uncaught exception and the promise never
+      // settles.
+      try {
+        /** @type {Array<Uint8Array>} */
+        const rows = (request.result || []).map(row =>
+          row instanceof Uint8Array ? row : new Uint8Array(row)
+        )
+        if (rows.length === 0) {
+          resolve(null)
+        } else if (rows.length === 1) {
+          resolve(rows[0])
+        } else {
+          resolve(Y.mergeUpdates(rows))
+        }
+      } catch (e) {
+        reject(e)
       }
     }
     tx.onerror = tx.onabort = event => {

@@ -12,6 +12,7 @@ import * as errorPayload from './error-payload.tests.js'
 import * as errorListener from './error-listener.tests.js'
 import * as pendingStructs from './pending-structs.tests.js'
 import * as corruptRow from './corrupt-row.tests.js'
+import * as snapshotErrors from './snapshot-errors.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -34,7 +35,8 @@ runTests({
   errorPayload,
   errorListener,
   pendingStructs,
-  corruptRow
+  corruptRow,
+  snapshotErrors
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
