@@ -702,11 +702,38 @@ export class IndexeddbPersistence extends Observable {
     this._writing = true
     const batch = this._pendingUpdates
     this._pendingUpdates = []
-    // Tracks whether the flush work below ran to a conclusion. If the
-    // transactionRunner rejects without it, recovery happens in the chained
-    // rejection handler instead.
-    let settled = false
-    this._flushPromise = transactWrite(this, () => new Promise(resolve => {
+    // Each flush attempt is concluded exactly once, and `_flushPromise`
+    // resolves only then. Once the transaction is under way, its outcome
+    // concludes the attempt: the transactionRunner's promise may settle
+    // before it does (a deadline that rejects, or a watchdog that resolves,
+    // while the transaction is stalled), and acting on that would let a
+    // retry open a second flush transaction beside the pending one,
+    // flush()/destroy() stop waiting for it, and its late outcome be handled
+    // a second time. The runner settling only concludes an attempt whose
+    // transaction never got under way.
+    let concluded = false
+    let txUnderWay = false
+    /** @type {() => void} */
+    let onConcluded = () => {}
+    /** @type {Promise<void>} */
+    const flushPromise = new Promise(resolve => { onConcluded = resolve })
+    /**
+     * @param {any} err
+     */
+    const onFailed = err => {
+      if (concluded) return
+      concluded = true
+      this._onFlushFailed(batch, err)
+      onConcluded()
+    }
+    transactWrite(this, () => new Promise(resolve => {
+      // The runner settled without running this work and runs it only now
+      // (e.g. a lock queue whose timeout does not dequeue): the batch was
+      // already re-buffered, so don't open a stale transaction.
+      if (concluded) {
+        resolve(undefined)
+        return
+      }
       /**
        * @type {IDBTransaction}
        */
@@ -714,8 +741,7 @@ export class IndexeddbPersistence extends Observable {
       try {
         tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
       } catch (e) {
-        settled = true
-        this._onFlushFailed(batch, e)
+        onFailed(e)
         resolve(undefined)
         return
       }
@@ -724,7 +750,7 @@ export class IndexeddbPersistence extends Observable {
         store.add(batch[i])
       }
       tx.oncomplete = () => {
-        settled = true
+        concluded = true
         this._retryCount = 0
         this._dbsize += batch.length
         this._writing = false
@@ -754,28 +780,39 @@ export class IndexeddbPersistence extends Observable {
             }
           }, this._storeTimeout)
         }
+        onConcluded()
         resolve(undefined)
       }
       // A failed transaction fires a bubbling 'error' event for every pending
-      // request and then 'abort' — guard so one failure is handled once.
-      let handled = false
+      // request and then 'abort' — `onFailed` handles one failure once.
       const onErrorOrAbort = () => {
-        if (handled) return
-        handled = true
-        settled = true
-        this._onFlushFailed(batch, tx.error)
+        onFailed(tx.error)
         resolve(undefined)
       }
       tx.onerror = onErrorOrAbort
       tx.onabort = onErrorOrAbort
-    })).then(() => {}, err => {
+      // From here on only the transaction's outcome concludes the attempt.
+      txUnderWay = true
+    })).then(() => {
+      // The runner resolved without the work getting its transaction under
+      // way (it skipped the work, or runs it only later): nothing else will
+      // conclude the attempt.
+      if (!txUnderWay) {
+        onFailed(new Error('transactionRunner resolved without running the flush'))
+      }
+    }, err => {
       // The transactionRunner itself failed. Without this, _writing would
       // stay true forever and every future update would silently pile up in
       // _pendingUpdates without ever being written.
-      if (!settled) {
-        this._onFlushFailed(batch, err)
+      if (!txUnderWay) {
+        onFailed(err)
       }
     })
+    // Unless the attempt already failed synchronously (the transaction
+    // could not be opened), which cleared `_flushPromise`.
+    if (!concluded) {
+      this._flushPromise = flushPromise
+    }
   }
 
   /**
@@ -799,10 +836,10 @@ export class IndexeddbPersistence extends Observable {
   async flush () {
     await this._db
     for (;;) {
-      // A flush is in flight — wait for it to settle. Gate on `_writing` as
-      // well: a transaction that fails synchronously leaves a resolved
-      // `_flushPromise` behind (the assignment overwrites the null set in
-      // `_onFlushFailed`), and awaiting that alone would spin.
+      // A flush is in flight — wait for it to settle. `_flushPromise`
+      // resolves only once the attempt has concluded and cleared `_writing`
+      // (not when the transactionRunner's promise settles), so this cannot
+      // re-await a settled promise in a loop that starves the event loop.
       if (this._writing) {
         await (this._flushPromise || new Promise(resolve => setTimeout(resolve, 10)))
         continue
