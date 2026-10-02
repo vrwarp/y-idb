@@ -800,60 +800,70 @@ export class IndexeddbPersistence extends Observable {
     this.destroy = this.destroy.bind(this)
     doc.on('destroy', this.destroy)
 
+    /**
+     * Writes the buffered updates in a transaction opened synchronously:
+     * pagehide cannot wait for the transactionRunner, as the page may be
+     * gone right after the event. Resolves once the transaction has
+     * settled, so a runner wrapping this call holds its lock until then.
+     * @return {Promise<void>}
+     */
     this._unloadListener = () => {
-      if (this.db && this._pendingUpdates.length > 0) {
-        // Captured up front: a listener running on an already destroyed
-        // instance drops the batch, but a write that fails while destroy()
-        // waits for it must hand the batch back for the final write.
-        const destroyed = this._destroyed
-        // Hydration may not get to commit the initial state once the page
-        // is gone; the buffered updates build on it, so write it with them.
-        this._requeueInitialState()
-        const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
-        /** @type {(value: void) => void} */
-        let resolveWrite = () => {}
-        const write = new Promise(resolve => { resolveWrite = resolve })
-        this._unloadWrites.add(write)
-        const settle = () => {
-          this._unloadWrites.delete(write)
-          resolveWrite()
+      if (!this.db || this._pendingUpdates.length === 0) {
+        return Promise.resolve()
+      }
+      // Captured up front: a listener running on an already destroyed
+      // instance drops the batch, but a write that fails while destroy()
+      // waits for it must hand the batch back for the final write.
+      const destroyed = this._destroyed
+      // Hydration may not get to commit the initial state once the page
+      // is gone; the buffered updates build on it, so write it with them.
+      this._requeueInitialState()
+      const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
+      /** @type {(value: void) => void} */
+      let resolveWrite = () => {}
+      /** @type {Promise<void>} */
+      const write = new Promise(resolve => { resolveWrite = resolve })
+      this._unloadWrites.add(write)
+      const settle = () => {
+        this._unloadWrites.delete(write)
+        resolveWrite()
+      }
+      /**
+       * @param {any} err
+       */
+      const onFailed = err => {
+        if (!destroyed) {
+          // Hand the batch back to the flusher, which owns retries: an
+          // in-flight flush picks it up when it settles, an armed backoff
+          // retry when it fires, otherwise the flush scheduled here does.
+          this._pendingUpdates = batch.concat(this._pendingUpdates)
+          // Isolated: a throwing listener must not skip scheduling the
+          // retry or settling the write flush()/destroy() wait for.
+          emitIsolated(this, 'error', [err])
+          this._scheduleFlush()
         }
-        /**
-         * @param {any} err
-         */
-        const onFailed = err => {
-          if (!destroyed) {
-            // Hand the batch back to the flusher, which owns retries: an
-            // in-flight flush picks it up when it settles, an armed backoff
-            // retry when it fires, otherwise the flush scheduled here does.
-            this._pendingUpdates = batch.concat(this._pendingUpdates)
-            // Isolated: a throwing listener must not skip scheduling the
-            // retry or settling the write flush()/destroy() wait for.
-            emitIsolated(this, 'error', [err])
-            this._scheduleFlush()
-          }
+        settle()
+      }
+      try {
+        const tx = this.db.transaction([updatesStoreName], 'readwrite')
+        const store = tx.objectStore(updatesStoreName)
+        for (let i = 0; i < batch.length; i++) {
+          store.add(batch[i])
+        }
+        tx.oncomplete = () => {
+          this._dbsize += batch.length
           settle()
         }
-        try {
-          const tx = this.db.transaction([updatesStoreName], 'readwrite')
-          const store = tx.objectStore(updatesStoreName)
-          for (let i = 0; i < batch.length; i++) {
-            store.add(batch[i])
-          }
-          tx.oncomplete = () => {
-            this._dbsize += batch.length
-            settle()
-          }
-          let handled = false
-          tx.onerror = tx.onabort = event => {
-            if (handled) return
-            handled = true
-            onFailed(transactionError(tx, event, 'page-hide write failed'))
-          }
-        } catch (e) {
-          onFailed(e)
+        let handled = false
+        tx.onerror = tx.onabort = event => {
+          if (handled) return
+          handled = true
+          onFailed(transactionError(tx, event, 'page-hide write failed'))
         }
+      } catch (e) {
+        onFailed(e)
       }
+      return write
     }
     if (typeof addEventListener !== 'undefined') {
       addEventListener('pagehide', this._unloadListener)
@@ -861,7 +871,15 @@ export class IndexeddbPersistence extends Observable {
     if (typeof document !== 'undefined') {
       this._visibilityListener = () => {
         if (document.visibilityState === 'hidden') {
-          this._unloadListener()
+          // Unlike pagehide, a tab switch can wait for the transactionRunner
+          // (without one this still writes synchronously). The updates stay
+          // buffered until the write starts, so a pagehide that fires while
+          // the runner is busy still writes them itself.
+          transactWrite(this, this._unloadListener).catch(err => {
+            if (!this._destroyed) {
+              this.emit('error', [err])
+            }
+          })
         }
       }
       document.addEventListener('visibilitychange', this._visibilityListener)

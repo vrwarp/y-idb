@@ -14,6 +14,7 @@ import * as pendingStructs from './pending-structs.tests.js'
 import * as corruptRow from './corrupt-row.tests.js'
 import * as snapshotErrors from './snapshot-errors.tests.js'
 import * as peerDeps from './peer-deps.tests.js'
+import * as lifecycleRunner from './lifecycle-runner.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -38,7 +39,8 @@ runTests({
   pendingStructs,
   corruptRow,
   snapshotErrors,
-  peerDeps
+  peerDeps,
+  lifecycleRunner
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

@@ -69,7 +69,11 @@ transaction hangs and silent write drops. Note that other operations
 (<code>set</code>/<code>del</code>, periodic compaction, the page-hide flush,
 and the final flush during <code>destroy()</code>) open their own
 transactions; supply <code>options.transactionRunner</code> if all writes
-must be strictly serialized.
+must be strictly serialized. The one exception is the write on
+<code>pagehide</code>: the page may be gone right after that event, so it
+opens its transaction immediately instead of waiting for the runner (the
+write on <code>visibilitychange</code> to hidden does go through the
+runner).
 
 An optional <code>options.durability</code> (default <code>'default'</code>,
 which can be set to <code>'relaxed'</code>) controls the transaction
