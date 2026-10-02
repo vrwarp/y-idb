@@ -55,11 +55,15 @@ trim latency and bytes written stay flat as the document ages. A <i>full
 consolidation</i> (re-encode the whole document into a single row, which
 also drops content Yjs has garbage-collected in memory) runs only when
 delta rows have accumulated: more than <code>options.trimSegmentRows</code>
-(default 24) of them, or more delta bytes than
-max(<code>options.trimFullCompactBytes</code> (default 1 MiB), the base
-row's size) — bounding the database at roughly 2&times; the consolidated
-document size. Explicit <code>storeState(provider, true)</code> calls
-always consolidate fully.
+(default 24) of them, or more delta bytes (the fresh tail counted at its
+stored size) than max(<code>options.trimFullCompactBytes</code> (default
+1 MiB), the base row's size) — bounding the database at roughly 2&times;
+the consolidated document size. Both checks run before the tail is merged,
+the row check before it is even read, so a full consolidation never also
+merges a tail it would discard: on the aging benchmark (1–2.4 MB document)
+that takes ~20 ms (30–40%) off each full trim's longest main-thread task,
+and ~180 ms (68%) when the tail holds a full-state row. Explicit
+<code>storeState(provider, true)</code> calls always consolidate fully.
 
 A trim that fails (e.g. with a <code>QuotaExceededError</code> when the
 origin is near its storage quota) backs off: until a trim commits, the

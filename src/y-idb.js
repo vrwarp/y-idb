@@ -448,25 +448,44 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
         }
 
         // Incremental trim: fold every row after the last fold boundary
-        // into ONE delta row — O(new updates), no document re-encode. Rows
-        // between lastSegKey and prevDbref may predate this session
-        // (leftover tail from an earlier run) or be this provider's own
-        // flushed rows; they are already in the doc, but still need
-        // folding, so read them here.
-        return getAllKeysValues(updatesStore, idb.createIDBKeyRangeLowerBound(trimState.lastSegKey, true)).then(tail => {
+        // into ONE delta row — O(new updates), no document re-encode.
+        // Rows in (baseKey, lastSegKey] are the delta rows written by
+        // earlier incremental trims (zero right after a full
+        // consolidation, when the two keys are equal).
+        const segRowsPromise = /** @type {Promise<number>} */ (
+          trimState.lastSegKey > trimState.baseKey
+            ? rtop(updatesStore.count(idb.createIDBKeyRangeBound(trimState.baseKey, trimState.lastSegKey, true, false)))
+            : promise.resolve(0)
+        )
+        return segRowsPromise.then(segRows => {
           if (idbPersistence._destroyed) return
-          if (tail.length === 0) {
-            return undefined
+          // Too many delta rows, or (below) too many delta bytes:
+          // consolidate fully instead of writing yet another delta row.
+          // Bounds the database at roughly 2x the consolidated document.
+          // Decide before reading the tail (rows) and before merging it
+          // (bytes): a full consolidation re-encodes the doc instead and
+          // would discard the merge, in the same main-thread task.
+          if (segRows + 1 >= idbPersistence._trimSegmentRows) {
+            return fullConsolidation()
           }
-          // Rows in (baseKey, lastSegKey] are the delta rows written by
-          // earlier incremental trims (zero right after a full
-          // consolidation, when the two keys are equal).
-          const segRowsPromise = /** @type {Promise<number>} */ (
-            trimState.lastSegKey > trimState.baseKey
-              ? rtop(updatesStore.count(idb.createIDBKeyRangeBound(trimState.baseKey, trimState.lastSegKey, true, false)))
-              : promise.resolve(0)
-          )
-          return segRowsPromise.then(segRows => {
+          // Rows between lastSegKey and prevDbref may predate this session
+          // (leftover tail from an earlier run) or be this provider's own
+          // flushed rows; they are already in the doc, but still need
+          // folding, so read them here.
+          return getAllKeysValues(updatesStore, idb.createIDBKeyRangeLowerBound(trimState.lastSegKey, true)).then(tail => {
+            if (idbPersistence._destroyed) return
+            if (tail.length === 0) {
+              return undefined
+            }
+            const budget = Math.max(idbPersistence._trimFullCompactBytes, trimState.baseBytes)
+            // Count the tail at its stored size first: a merged row is
+            // usually barely smaller (about 95% on typical tails), so this
+            // settles most byte-triggered trims without merging. When it
+            // does not, the exact check on the merged row below decides.
+            const tailBytes = tail.reduce((bytes, row) => bytes + row.v.byteLength, 0)
+            if (trimState.segBytes + tailBytes >= budget) {
+              return fullConsolidation()
+            }
             /** @type {Uint8Array} */
             let merged
             try {
@@ -478,13 +497,7 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
               return fullConsolidation()
             }
             const segBytes = trimState.segBytes + merged.byteLength
-            // Byte budget exceeded or too many delta rows: consolidate
-            // fully instead of writing yet another delta row. Bounds the
-            // database at roughly 2x the consolidated document.
-            if (
-              segRows + 1 >= idbPersistence._trimSegmentRows ||
-              segBytes >= Math.max(idbPersistence._trimFullCompactBytes, trimState.baseBytes)
-            ) {
+            if (segBytes >= budget) {
               return fullConsolidation()
             }
             return rtop(updatesStore.add(merged))

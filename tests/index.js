@@ -20,6 +20,7 @@ import * as flushBackoff from './flush-backoff.tests.js'
 import * as hydrationEncode from './hydration-encode.tests.js'
 import * as trimOwnRows from './trim-own-rows.tests.js'
 import * as trimFailure from './trim-failure.tests.js'
+import * as trimWastedMerge from './trim-wasted-merge.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -50,7 +51,8 @@ runTests({
   flushBackoff,
   hydrationEncode,
   trimOwnRows,
-  trimFailure
+  trimFailure,
+  trimWastedMerge
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
