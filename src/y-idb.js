@@ -26,17 +26,35 @@ export const MAX_SEGMENT_ROWS = 24
 export const MIN_FULL_COMPACT_BYTES = 1_048_576
 
 /**
+ * Run `work` through `transactionRunner` when one is supplied. Callers attach
+ * their failure handling to the returned promise, so a runner that throws
+ * synchronously (e.g. a non-async wrapper around a disposed lock) is turned
+ * into a rejection instead of bypassing it — in `_flush` that would lose the
+ * detached batch and leave `_writing` stuck forever.
+ *
+ * @template T
+ * @param {(<U>(work: () => Promise<U>) => Promise<U>)|undefined} transactionRunner
+ * @param {() => Promise<T>} work
+ * @return {Promise<T>}
+ */
+const runTransaction = (transactionRunner, work) => {
+  if (!transactionRunner) {
+    return work()
+  }
+  try {
+    return Promise.resolve(transactionRunner(work))
+  } catch (e) {
+    return Promise.reject(e)
+  }
+}
+
+/**
  * @template T
  * @param {IndexeddbPersistence} idbPersistence
  * @param {() => Promise<T>} work
  * @return {Promise<T>}
  */
-const transactWrite = (idbPersistence, work) => {
-  if (idbPersistence.transactionRunner) {
-    return idbPersistence.transactionRunner(work)
-  }
-  return work()
-}
+const transactWrite = (idbPersistence, work) => runTransaction(idbPersistence.transactionRunner, work)
 
 /**
  * `_dbref` and `_dbsize` are advanced from request callbacks, before the
@@ -354,7 +372,7 @@ export const readSnapshot = (name, { transactionRunner } = {}) => {
       reject(tx.error || new Error('readSnapshot transaction failed'))
     }
   }))
-  return transactionRunner ? transactionRunner(work) : work()
+  return runTransaction(transactionRunner, work)
 }
 
 /**
@@ -411,7 +429,7 @@ export const writeSnapshot = (name, update, { transactionRunner } = {}) => {
       reject(tx.error || new Error('writeSnapshot transaction failed'))
     }
   }))
-  return transactionRunner ? transactionRunner(work) : work()
+  return runTransaction(transactionRunner, work)
 }
 
 /**

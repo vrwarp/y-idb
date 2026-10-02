@@ -3,6 +3,7 @@ import * as destroyBeforeOpen from './destroy-before-open.tests.js'
 import * as hydrationInitstate from './hydration-initstate.tests.js'
 import * as dbrefAbort from './dbref-abort.tests.js'
 import * as runnerSettle from './runner-settle.tests.js'
+import * as runnerSyncThrow from './runner-sync-throw.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -16,7 +17,8 @@ runTests({
   destroyBeforeOpen,
   hydrationInitstate,
   dbrefAbort,
-  runnerSettle
+  runnerSettle,
+  runnerSyncThrow
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
