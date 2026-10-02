@@ -140,9 +140,11 @@ Delete a stored value.
 Force-drain the buffered update queue immediately, bypassing the
 <code>writeDebounceMs</code> timer. Resolves once every pending update
 (including any that arrive while a write is in flight) has been committed, or
-immediately when the queue is idle. While a write keeps failing it waits for
-the scheduled backoff retry rather than hot-spinning, so callers that need a
-time bound should race it against a deadline.
+immediately when the queue is idle. While a write keeps failing it backs off
+between attempts rather than hot-spinning: it waits for the scheduled backoff
+retry, or, once retries are exhausted (always with <code>maxRetries: 0</code>),
+for the same exponential backoff of its own. Callers that need a time bound
+should race it against a deadline.
   </dd>
   <dt><b><code>provider.destroy(): Promise</code></b></dt>
   <dd>

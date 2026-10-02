@@ -16,6 +16,7 @@ import * as snapshotErrors from './snapshot-errors.tests.js'
 import * as peerDeps from './peer-deps.tests.js'
 import * as lifecycleRunner from './lifecycle-runner.tests.js'
 import * as destroyTimers from './destroy-timers.tests.js'
+import * as flushBackoff from './flush-backoff.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -42,7 +43,8 @@ runTests({
   snapshotErrors,
   peerDeps,
   lifecycleRunner,
-  destroyTimers
+  destroyTimers,
+  flushBackoff
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

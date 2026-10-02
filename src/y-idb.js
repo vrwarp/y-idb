@@ -605,6 +605,11 @@ export class IndexeddbPersistence extends Observable {
     this._retryCount = 0
     this._maxRetries = maxRetries
     /**
+     * Total failed flush attempts. flush() compares it across an attempt to
+     * tell a failure from a success that left newly arrived updates queued.
+     */
+    this._failedFlushes = 0
+    /**
      * Pending backoff timer after a failed flush. While it is armed, flush
      * scheduling is deferred to it so the backoff cannot be bypassed.
      * @type {any}
@@ -933,6 +938,7 @@ export class IndexeddbPersistence extends Observable {
    * @param {any} err
    */
   _onFlushFailed (batch, err) {
+    this._failedFlushes++
     this._pendingUpdates = batch.concat(this._pendingUpdates)
     this._writing = false
     this._flushPromise = null
@@ -1105,13 +1111,30 @@ export class IndexeddbPersistence extends Observable {
    */
   async flush () {
     await this._db
+    let exhaustedFailures = 0
+    /**
+     * Once retries are exhausted (always, with `maxRetries: 0`) a failed
+     * attempt arms no backoff timer, so retrying at once would loop through
+     * microtasks only — starving every timer, including the deadline callers
+     * race flush() against. Back off as the automatic retries do instead.
+     *
+     * @param {number} failedBefore `_failedFlushes` before the attempt
+     */
+    const backOffIfExhausted = async failedBefore => {
+      if (this._failedFlushes === failedBefore || this._retryTimeoutId !== null || this._destroyed) return
+      exhaustedFailures++
+      const backoff = Math.pow(2, Math.min(exhaustedFailures, 5)) * 100
+      await new Promise(resolve => setTimeout(resolve, backoff))
+    }
     for (;;) {
       // A flush is in flight — wait for it to settle. `_flushPromise`
       // resolves only once the attempt has concluded and cleared `_writing`
       // (not when the transactionRunner's promise settles), so this cannot
       // re-await a settled promise in a loop that starves the event loop.
       if (this._writing) {
+        const failedBefore = this._failedFlushes
         await (this._flushPromise || new Promise(resolve => setTimeout(resolve, 10)))
+        await backOffIfExhausted(failedBefore)
         continue
       }
       // A page-hide write took the queue into its own transaction — wait for
@@ -1128,11 +1151,13 @@ export class IndexeddbPersistence extends Observable {
         await new Promise(resolve => setTimeout(resolve, 50))
         continue
       }
+      const failedBefore = this._failedFlushes
       this._flush()
       if (!this._writing) {
         // `_flush` declined to run (raced the debounce timer's own run) or
         // failed synchronously — yield and re-check rather than spinning.
         await new Promise(resolve => setTimeout(resolve, 10))
+        await backOffIfExhausted(failedBefore)
       }
     }
   }
