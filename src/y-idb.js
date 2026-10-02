@@ -99,6 +99,26 @@ const transactionError = (tx, event, message) => {
 }
 
 /**
+ * Emit an event without letting a throwing listener unwind into the caller.
+ * Listeners are user code that runs synchronously: an exception escaping
+ * into the provider's own follow-up work (arming a retry, settling a write,
+ * closing the database) would skip it and wedge the provider. The exception
+ * is re-thrown from a microtask instead, so it is still reported, like one
+ * thrown by a DOM event listener.
+ *
+ * @param {Observable<string>} observable
+ * @param {string} name
+ * @param {Array<any>} args
+ */
+const emitIsolated = (observable, name, args) => {
+  try {
+    observable.emit(name, args)
+  } catch (e) {
+    queueMicrotask(() => { throw e })
+  }
+}
+
+/**
  * @param {IndexeddbPersistence} idbPersistence
  * @param {function(IDBObjectStore):any} [beforeApplyUpdatesCallback]
  * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
@@ -551,11 +571,13 @@ export class IndexeddbPersistence extends Observable {
         this._scheduleFlush()
       }
       /**
+       * Isolated: every caller still has to emit 'synced' or schedule the
+       * flush, which a throwing listener must not skip.
        * @param {any} err
        */
       const emitHydrationError = err => {
         if (!this._destroyed) {
-          this.emit('error', [err])
+          emitIsolated(this, 'error', [err])
         }
       }
       /**
@@ -712,7 +734,9 @@ export class IndexeddbPersistence extends Observable {
             // in-flight flush picks it up when it settles, an armed backoff
             // retry when it fires, otherwise the flush scheduled here does.
             this._pendingUpdates = batch.concat(this._pendingUpdates)
-            this.emit('error', [err])
+            // Isolated: a throwing listener must not skip scheduling the
+            // retry or settling the write flush()/destroy() wait for.
+            emitIsolated(this, 'error', [err])
             this._scheduleFlush()
           }
           settle()
@@ -795,7 +819,10 @@ export class IndexeddbPersistence extends Observable {
     this._pendingUpdates = batch.concat(this._pendingUpdates)
     this._writing = false
     this._flushPromise = null
-    this.emit('error', [err])
+    // Isolated: a throwing listener must not skip arming the retry below or
+    // the caller's resolve() — the flush work would never settle, hanging
+    // flush()/destroy() and wedging a serializing transactionRunner.
+    emitIsolated(this, 'error', [err])
     if (!this._destroyed) {
       this._retryCount++
       if (this._retryCount <= this._maxRetries) {
@@ -806,7 +833,7 @@ export class IndexeddbPersistence extends Observable {
         }, backoff)
       } else {
         this._retryCount = 0
-        this.emit('retry-exhausted', [err || new Error('Retry exhausted')])
+        emitIsolated(this, 'retry-exhausted', [err || new Error('Retry exhausted')])
       }
     }
   }
@@ -1059,18 +1086,21 @@ export class IndexeddbPersistence extends Observable {
               tx.onerror = tx.onabort = event => {
                 if (!handled) {
                   handled = true
-                  this.emit('error', [transactionError(tx, event, 'final flush transaction failed')])
+                  // Isolated: a commit failure fires only 'abort', so a
+                  // throwing listener would skip the one resolve() and
+                  // destroy() would never settle.
+                  emitIsolated(this, 'error', [transactionError(tx, event, 'final flush transaction failed')])
                 }
                 resolve(undefined)
               }
             } catch (e) {
-              this.emit('error', [e])
+              emitIsolated(this, 'error', [e])
               resolve(undefined)
             }
           })).catch(err => {
             // transactionRunner failure during the final flush — nothing
             // more can be done at teardown beyond surfacing it.
-            this.emit('error', [err])
+            emitIsolated(this, 'error', [err])
           })
         }
       })
