@@ -633,6 +633,11 @@ export class IndexeddbPersistence extends Observable {
     this._writing = false
     this._flushScheduled = false
     /**
+     * Pending `writeDebounceMs` timer, tracked so destroy() can clear it.
+     * @type {any}
+     */
+    this._debounceTimeoutId = null
+    /**
      * Page-hide writes still in flight (see `_unloadListener`). They bypass
      * the flusher, so flush() and destroy() wait for them separately.
      * @type {Set<Promise<void>>}
@@ -894,7 +899,8 @@ export class IndexeddbPersistence extends Observable {
     if (this._flushScheduled) return
     this._flushScheduled = true
     if (this.writeDebounceMs > 0) {
-      setTimeout(() => {
+      this._debounceTimeoutId = setTimeout(() => {
+        this._debounceTimeoutId = null
         this._flushScheduled = false
         this._flush()
       }, this.writeDebounceMs)
@@ -1142,6 +1148,10 @@ export class IndexeddbPersistence extends Observable {
     if (this._retryTimeoutId !== null) {
       clearTimeout(this._retryTimeoutId)
       this._retryTimeoutId = null
+    }
+    if (this._debounceTimeoutId !== null) {
+      clearTimeout(this._debounceTimeoutId)
+      this._debounceTimeoutId = null
     }
     this.doc.off('update', this._storeUpdate)
     this.doc.off('destroy', this.destroy)

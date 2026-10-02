@@ -2196,8 +2196,9 @@ export const testDestroyWithoutDocumentGlobal = async tc => {
 }
 
 /**
- * destroy() must clear both pending timers. A surviving trim or retry timer
- * fires against a closed database after teardown.
+ * destroy() must clear all pending timers. A surviving trim or retry timer
+ * fires against a closed database after teardown; a surviving debounce timer
+ * keeps the destroyed provider reachable until it fires.
  *
  * @param {t.TestCase} tc
  */
@@ -2209,11 +2210,13 @@ export const testDestroyClearsPendingTimers = async tc => {
 
   persistence._storeTimeoutId = setTimeout(() => {}, 10_000)
   persistence._retryTimeoutId = setTimeout(() => {}, 10_000)
+  persistence._debounceTimeoutId = setTimeout(() => {}, 10_000)
 
   await persistence.destroy()
 
   t.assert(persistence._storeTimeoutId === null, 'trim timer must be cleared')
   t.assert(persistence._retryTimeoutId === null, 'retry timer must be cleared')
+  t.assert(persistence._debounceTimeoutId === null, 'debounce timer must be cleared')
 }
 
 /**
