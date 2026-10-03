@@ -1044,8 +1044,10 @@ export class IndexeddbPersistence extends Observable {
           // Unlike pagehide, a tab switch can wait for the transactionRunner
           // (without one this still writes synchronously). The updates stay
           // buffered until the write starts, so a pagehide that fires while
-          // the runner is busy still writes them itself.
-          transactWrite(this, this._unloadListener).catch(err => {
+          // the runner is busy still writes them itself. A write the runner
+          // starts only after destroy() leaves them to destroy()'s final
+          // write, which destroy() waits for and whose failure it reports.
+          transactWrite(this, () => this._destroyed ? Promise.resolve() : this._unloadListener()).catch(err => {
             if (!this._destroyed) {
               this.emit('error', [err])
             }
