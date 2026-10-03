@@ -747,6 +747,14 @@ export class IndexeddbPersistence extends Observable {
      */
     this._flushPromise = null
     /**
+     * Set while a flush waits for the transactionRunner to start its work:
+     * concludes that attempt and returns its batch, so the work opens no
+     * transaction once it runs. The page-hide write takes the batch over
+     * with it (see `_unloadListener`).
+     * @type {(() => Array<Uint8Array>)|null}
+     */
+    this._takeQueuedFlush = null
+    /**
      * @type {Promise<void>|null}
      */
     this._destroyPromise = null
@@ -944,20 +952,31 @@ export class IndexeddbPersistence extends Observable {
     doc.on('destroy', this.destroy)
 
     /**
-     * Writes the buffered updates in a transaction opened synchronously:
-     * pagehide cannot wait for the transactionRunner, as the page may be
-     * gone right after the event. Resolves once the transaction has
-     * settled, so a runner wrapping this call holds its lock until then.
+     * Writes the buffered updates, and the batch of a flush still waiting
+     * for the transactionRunner, in a transaction opened synchronously:
+     * pagehide cannot wait for the runner, as the page may be gone right
+     * after the event. Resolves once the transaction has settled, so a
+     * runner wrapping this call holds its lock until then.
      * @return {Promise<void>}
      */
     this._unloadListener = () => {
-      if (!this.db || this._pendingUpdates.length === 0) {
+      if (!this.db) {
         return Promise.resolve()
       }
       // Captured up front: a listener running on an already destroyed
       // instance drops the batch, but a write that fails while destroy()
       // waits for it must hand the batch back for the final write.
       const destroyed = this._destroyed
+      if (!destroyed && this._takeQueuedFlush !== null) {
+        // A flush still waiting for a busy runner already took its batch
+        // out of the buffer, and it never runs once the page is gone: write
+        // that batch here, ahead of the updates that build on it. (On a
+        // destroyed instance, destroy() waits for that flush instead.)
+        this._pendingUpdates = this._takeQueuedFlush().concat(this._pendingUpdates)
+      }
+      if (this._pendingUpdates.length === 0) {
+        return Promise.resolve()
+      }
       // Hydration may not get to commit the initial state once the page
       // is gone; the buffered updates build on it, so write it with them.
       this._requeueInitialState()
@@ -1141,13 +1160,26 @@ export class IndexeddbPersistence extends Observable {
     const onFailed = err => {
       if (concluded) return
       concluded = true
+      this._takeQueuedFlush = null
       this._onFlushFailed(batch, err)
       onConcluded()
     }
+    // pagehide cannot wait for the runner: until the transaction is under
+    // way, the page-hide write may take the batch over (see
+    // `_unloadListener`), which concludes the attempt.
+    this._takeQueuedFlush = () => {
+      concluded = true
+      this._takeQueuedFlush = null
+      this._writing = false
+      this._flushPromise = null
+      onConcluded()
+      return batch
+    }
     transactWrite(this, () => new Promise(resolve => {
       // The runner settled without running this work and runs it only now
-      // (e.g. a lock queue whose timeout does not dequeue): the batch was
-      // already re-buffered, so don't open a stale transaction.
+      // (e.g. a lock queue whose timeout does not dequeue), or the page-hide
+      // write took the batch over: the batch was already re-buffered or
+      // written, so don't open a stale transaction.
       if (concluded) {
         resolve(undefined)
         return
@@ -1206,6 +1238,7 @@ export class IndexeddbPersistence extends Observable {
       tx.onabort = onErrorOrAbort
       // From here on only the transaction's outcome concludes the attempt.
       txUnderWay = true
+      this._takeQueuedFlush = null
     })).then(() => {
       // The runner resolved without the work getting its transaction under
       // way (it skipped the work, or runs it only later): nothing else will
