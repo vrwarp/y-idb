@@ -8,13 +8,16 @@
  * A trim (storeState) and hydration move the provider's read cursor past
  * their own row from a request callback, before their transaction commits;
  * an abort restores it (see dbref-abort.tests.js). A serializing
- * transactionRunner releases its lock once the work's promise resolves, on
- * the transaction's last request callback, so the next queued trim starts
- * before the earlier transaction's outcome is known. If that transaction
- * then aborts (a QuotaExceededError at commit), IndexedDB reverts the
- * autoIncrement key generator and another tab's next row re-uses the key of
- * the aborted row. The queued trim must still read and apply that row, and
- * its full consolidation must not delete it.
+ * transactionRunner releases its lock once the work's promise resolves:
+ * for hydration on the transaction's last request callback, for a trim
+ * once it has committed, unless the runner gives up on it earlier (a
+ * watchdog releasing the lock while the commit stalls). So the next queued
+ * trim or fetch can start before the earlier transaction's outcome is
+ * known. If that transaction then aborts (a QuotaExceededError at commit),
+ * IndexedDB reverts the autoIncrement key generator and another tab's next
+ * row re-uses the key of the aborted row. The queued trim or fetch must
+ * still read and apply that row, and a full consolidation must not delete
+ * it.
  */
 
 import * as Y from 'yjs'
@@ -28,11 +31,15 @@ const requestMethods = /** @type {const} */ ([
 
 /**
  * A FIFO lock, the usual shape of a serializing transactionRunner: the next
- * work starts once the previous work's promise has settled.
+ * work starts once the previous work's promise has settled, or once
+ * `release()` gives up on the oldest work still holding the lock (what a
+ * watchdog runner does when a transaction stalls before commit).
  */
 const createFifoRunner = () => {
   /** @type {Promise<any>} */
   let chain = Promise.resolve()
+  /** @type {Array<function(): void>} */
+  const holders = []
   /**
    * @template T
    * @param {() => Promise<T>} work
@@ -40,8 +47,20 @@ const createFifoRunner = () => {
    */
   const runner = work => {
     const p = chain.then(work)
-    chain = p.catch(() => {})
+    /** @type {function(): void} */
+    let release = () => {}
+    const released = new Promise(resolve => { release = () => resolve(undefined) })
+    holders.push(release)
+    const settled = p.catch(() => {}).then(() => {
+      const i = holders.indexOf(release)
+      if (i >= 0) holders.splice(i, 1)
+    })
+    chain = Promise.race([settled, released])
     return p
+  }
+  runner.release = () => {
+    const release = holders.shift()
+    if (release) release()
   }
   return runner
 }
@@ -66,7 +85,8 @@ const openOtherTab = name => idb.openDB(name, db =>
  *   opens (the provider's) is aborted when it would otherwise commit: every
  *   request it issued has succeeded and no further request was issued once
  *   their callbacks had run. That is how a commit-time QuotaExceededError
- *   or a background-tab kill shows up.
+ *   or a background-tab kill shows up. `onCommitPoint`, if given, runs
+ *   right before (the abort's event is dispatched later).
  * - As soon as that transaction is created, `otherTab` opens its own
  *   readwrite transaction adding `otherUpdate` (tab B flushes while tab A's
  *   transaction is running). IndexedDB runs it after the provider's
@@ -80,8 +100,9 @@ const openOtherTab = name => idb.openDB(name, db =>
  * @param {string} name
  * @param {IDBDatabase} otherTab
  * @param {Uint8Array} otherUpdate
+ * @param {function(): void} [onCommitPoint]
  */
-const injectAbortWithOtherTabWrite = (name, otherTab, otherUpdate) => {
+const injectAbortWithOtherTabWrite = (name, otherTab, otherUpdate, onCommitPoint = () => {}) => {
   const realTransaction = IDBDatabase.prototype.transaction
   const proto = /** @type {any} */ (IDBObjectStore.prototype)
   const realMethods = requestMethods.map(m => proto[m])
@@ -153,7 +174,10 @@ const injectAbortWithOtherTabWrite = (name, otherTab, otherUpdate) => {
           // event dispatch (an implementation detail); the tests'
           // `state.aborted` precondition catches a silent miss.
           setImmediate(() => {
-            if (requests.every(r => r.readyState === 'done')) abort()
+            if (!state.aborted && requests.every(r => r.readyState === 'done')) {
+              onCommitPoint()
+              abort()
+            }
           })
         })
       }
@@ -209,7 +233,7 @@ const otherTabUpdate = () => {
 /**
  * Tab A runs two trims through a FIFO transactionRunner. The first one's
  * full consolidation aborts at commit; the second starts as soon as the
- * first one's work resolves (its last request callback), before that abort.
+ * runner gives up on the first one (at its commit point), before that abort.
  * Tab B flushes while the first trim's transaction is running, so its row
  * gets the key the aborted base row had. The second trim must read and keep
  * it.
@@ -219,7 +243,8 @@ const otherTabUpdate = () => {
 export const testTrimQueuedBehindAbortedTrimKeepsOtherTabsEdit = async tc => {
   await clearDocument(tc.testName)
   const docA = new Y.Doc()
-  const pA = new IndexeddbPersistence(tc.testName, docA, { transactionRunner: createFifoRunner() })
+  const runner = createFifoRunner()
+  const pA = new IndexeddbPersistence(tc.testName, docA, { transactionRunner: runner })
   const otherTab = await openOtherTab(tc.testName)
   try {
     await pA.whenSynced
@@ -228,7 +253,7 @@ export const testTrimQueuedBehindAbortedTrimKeepsOtherTabsEdit = async tc => {
     await storeState(pA, true)
     t.compare(await reloadMap(tc.testName), { a: 1 }, 'seeded')
 
-    const fault = injectAbortWithOtherTabWrite(tc.testName, otherTab, otherTabUpdate())
+    const fault = injectAbortWithOtherTabWrite(tc.testName, otherTab, otherTabUpdate(), runner.release)
     try {
       const first = storeState(pA, true)
       const second = storeState(pA, true)
@@ -258,7 +283,8 @@ export const testTrimQueuedBehindAbortedTrimKeepsOtherTabsEdit = async tc => {
 export const testFetchQueuedBehindAbortedTrimKeepsOtherTabsEdit = async tc => {
   await clearDocument(tc.testName)
   const docA = new Y.Doc()
-  const pA = new IndexeddbPersistence(tc.testName, docA, { transactionRunner: createFifoRunner() })
+  const runner = createFifoRunner()
+  const pA = new IndexeddbPersistence(tc.testName, docA, { transactionRunner: runner })
   const otherTab = await openOtherTab(tc.testName)
   try {
     await pA.whenSynced
@@ -267,7 +293,7 @@ export const testFetchQueuedBehindAbortedTrimKeepsOtherTabsEdit = async tc => {
     await storeState(pA, true)
     t.compare(await reloadMap(tc.testName), { a: 1 }, 'seeded')
 
-    const fault = injectAbortWithOtherTabWrite(tc.testName, otherTab, otherTabUpdate())
+    const fault = injectAbortWithOtherTabWrite(tc.testName, otherTab, otherTabUpdate(), runner.release)
     try {
       const trim = storeState(pA, true)
       const fetch = fetchUpdates(pA)

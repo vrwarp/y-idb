@@ -117,10 +117,11 @@ const transactWrite = (idbPersistence, work) => runTransaction(idbPersistence.tr
  * so the snapshot holds committed values only. Read `_dbref` for the
  * transaction's catch-up read there too, not when the transaction is
  * created: an earlier trim or fetch of this provider may still be running
- * then (a serializing transactionRunner releases its lock on the work's
- * last request callback, before commit), and if it aborts, a read bounded
- * by the value it advanced to skips the row another tab writes at the
- * reverted key.
+ * then (a serializing transactionRunner releases its lock once the work
+ * resolves: a fetch's on its last request callback, before commit, and a
+ * watchdog runner may give up on a trim before it commits), and if it
+ * aborts, a read bounded by the value it advanced to skips the row another
+ * tab writes at the reverted key.
  *
  * @param {IndexeddbPersistence} idbPersistence
  * @param {IDBTransaction} tx
