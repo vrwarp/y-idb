@@ -444,8 +444,12 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
             .then(key => {
               if (idbPersistence._destroyed) return
               idbPersistence._dbref = key + 1
-              // The delete below drops every older row, corrupt ones too.
-              idbPersistence._hasCorruptRows = false
+              // The delete below drops every older row, corrupt ones too,
+              // but only if it commits: an aborted transaction keeps them,
+              // and the next trim must consolidate fully again.
+              updatesStore.transaction.addEventListener('complete', () => {
+                idbPersistence._hasCorruptRows = false
+              })
               return rtop(updatesStore.delete(idb.createIDBKeyRangeUpperBound(key, true)))
                 .then(() => rtop(customStore.put({
                   baseKey: key,

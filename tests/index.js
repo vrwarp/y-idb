@@ -12,6 +12,7 @@ import * as errorPayload from './error-payload.tests.js'
 import * as errorListener from './error-listener.tests.js'
 import * as pendingStructs from './pending-structs.tests.js'
 import * as corruptRow from './corrupt-row.tests.js'
+import * as corruptFlagAbort from './corrupt-flag-abort.tests.js'
 import * as snapshotErrors from './snapshot-errors.tests.js'
 import * as peerDeps from './peer-deps.tests.js'
 import * as lifecycleRunner from './lifecycle-runner.tests.js'
@@ -50,6 +51,7 @@ runTests({
   errorListener,
   pendingStructs,
   corruptRow,
+  corruptFlagAbort,
   snapshotErrors,
   peerDeps,
   lifecycleRunner,
