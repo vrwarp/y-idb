@@ -26,6 +26,7 @@ import * as benchHarness from './bench-harness.tests.js'
 import * as staleCursorAbort from './stale-cursor-abort.tests.js'
 import * as pagehideRunner from './pagehide-runner.tests.js'
 import * as visibilityDestroy from './visibility-destroy.tests.js'
+import * as yjsPeerFloor from './yjs-peer-floor.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -62,7 +63,8 @@ runTests({
   benchHarness,
   staleCursorAbort,
   pagehideRunner,
-  visibilityDestroy
+  visibilityDestroy,
+  yjsPeerFloor
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

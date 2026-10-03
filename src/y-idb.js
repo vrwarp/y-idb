@@ -222,7 +222,8 @@ const updateListeners = doc => doc._observers instanceof Map ? doc._observers.ge
  * never queued. A loaded row (e.g. written by another tab) can supply the
  * missing dependency, and Yjs then integrates the parked update inside this
  * transaction — under our origin. Queue the parked bytes first (Yjs keeps
- * them V2-encoded) so everything the load integrates is persisted.
+ * them V2-encoded; Y.convertUpdateFormatV2ToV1 is exported from yjs 13.5.23
+ * on, hence the peer floor) so everything the load integrates is persisted.
  *
  * Yjs encodes an update for every transaction while the doc has an 'update'
  * listener. For this transaction that update is as large as everything
