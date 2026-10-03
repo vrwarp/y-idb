@@ -438,7 +438,7 @@
         
         <h2>Key Benefits</h2>
         <ul style="margin-left: 20px; color: var(--text-muted); font-size: 15px; display: flex; flex-direction: column; gap: 8px;">
-          <li><strong>Bounded Concurrency:</strong> The update flusher keeps at most 1 in-flight flush transaction, greatly reducing IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers). Other operations (<code>set</code>/<code>del</code>, compaction, the page-hide flush, the final flush in <code>destroy()</code>) open their own transactions; a custom <code>transactionRunner</code> can serialize all writes.</li>
+          <li><strong>Bounded Concurrency:</strong> The update flusher keeps at most 1 in-flight flush transaction, greatly reducing IndexedDB scheduling locks and wedged connections in WebKit (Safari / iOS browsers). Other operations (<code>set</code>/<code>del</code>, compaction, the page-hide flush, the final flush in <code>destroy()</code>) open their own transactions; a custom <code>transactionRunner</code> can serialize all writes except the <code>pagehide</code> write, which cannot wait because the page may be gone right after the event.</li>
           <li><strong>Microtask Batching:</strong> Automatically bundles synchronous or high-frequency updates into a single write transaction with sub-millisecond latency.</li>
           <li><strong>Durability Safeguards:</strong> Best-effort flush listeners queue and persist memory updates on page hide, document destruction, and tab close.</li>
           <li><strong>Error Handling:</strong> Propagates database transaction errors (such as <code>QuotaExceededError</code>) through an Observable event emitter, preventing silent data drops.</li>
@@ -467,7 +467,7 @@ provider.on('synced', () => {
         
         <div class="api-entry">
           <div class="api-sig">new IndexeddbPersistence(docName: string, ydoc: Y.Doc, options?: { writeDebounceMs?: number, durability?: 'default' | 'relaxed', transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;, maxRetries?: number })</div>
-          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask). <code>durability</code> (default <code>'default'</code>) is passed to IndexedDB transactions; <code>'relaxed'</code> can significantly improve write throughput. <code>transactionRunner</code> wraps every internal write transaction, e.g. to serialize writes across databases with a global lock. <code>maxRetries</code> (default <code>5</code>) caps the exponential-backoff retries of failed writes.</p>
+          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask). <code>durability</code> (default <code>'default'</code>) is passed to IndexedDB transactions; <code>'relaxed'</code> can significantly improve write throughput. <code>transactionRunner</code> wraps every internal write transaction except the immediate <code>pagehide</code> write, e.g. to serialize writes across databases with a global lock. <code>maxRetries</code> (default <code>5</code>) caps the exponential-backoff retries of failed writes.</p>
         </div>
 
         <div class="api-entry">
@@ -482,7 +482,7 @@ provider.on('synced', () => {
 
         <div class="api-entry">
           <div class="api-sig">provider.on('error', (err: Error) => void)</div>
-          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update.</p>
+          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update. A stored update row that cannot be decoded is skipped and reported here; the remaining content still loads, <code>synced</code> still fires, and the next trim consolidates fully, deleting the bad row.</p>
         </div>
 
         <div class="api-entry">

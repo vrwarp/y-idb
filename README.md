@@ -55,11 +55,26 @@ trim latency and bytes written stay flat as the document ages. A <i>full
 consolidation</i> (re-encode the whole document into a single row, which
 also drops content Yjs has garbage-collected in memory) runs only when
 delta rows have accumulated: more than <code>options.trimSegmentRows</code>
-(default 24) of them, or more delta bytes than
-max(<code>options.trimFullCompactBytes</code> (default 1 MiB), the base
-row's size) — bounding the database at roughly 2&times; the consolidated
-document size. Explicit <code>storeState(provider, true)</code> calls
-always consolidate fully.
+(default 24) of them, or more delta bytes (the fresh tail counted at its
+stored size) than max(<code>options.trimFullCompactBytes</code> (default
+1 MiB), the base row's size) — bounding the database at roughly 2&times;
+the consolidated document size. Both checks run before the tail is merged,
+the row check before it is even read, so a full consolidation never also
+merges a tail it would discard: on the aging benchmark (1–2.4 MB document)
+that takes ~20 ms (30–40%) off each full trim's longest main-thread task,
+and ~180 ms (68%) when the tail holds a full-state row. Explicit
+<code>storeState(provider, true)</code> calls always consolidate fully.
+
+A trim that fails (e.g. with a <code>QuotaExceededError</code> when the
+origin is near its storage quota) backs off: until a trim commits, the
+next one waits 2 s, 4 s, 8 s, ... (at most 256 s) after the write that
+schedules it, instead of 1 s. Every attempt redoes the trim: it re-reads
+and re-merges the rows written since the last committed trim, or
+re-encodes the whole document; on an aged 1 MB document failing through
+400 writes 5 s apart, the backoff makes that 14 attempts instead of 394,
+and 17 MB instead of 477 MB offered to IndexedDB when every trim is a
+full consolidation. It saves the work but frees no space. Explicit
+<code>storeState</code> calls are never delayed.
 
 An optional <code>options.writeDebounceMs</code> (default <code>0</code>, which
 coalesces writes on a microtask) can be supplied to debounce and aggregate
@@ -69,7 +84,11 @@ transaction hangs and silent write drops. Note that other operations
 (<code>set</code>/<code>del</code>, periodic compaction, the page-hide flush,
 and the final flush during <code>destroy()</code>) open their own
 transactions; supply <code>options.transactionRunner</code> if all writes
-must be strictly serialized.
+must be strictly serialized. The one exception is the write on
+<code>pagehide</code>: the page may be gone right after that event, so it
+opens its transaction immediately instead of waiting for the runner (the
+write on <code>visibilitychange</code> to hidden does go through the
+runner).
 
 An optional <code>options.durability</code> (default <code>'default'</code>,
 which can be set to <code>'relaxed'</code>) controls the transaction
@@ -86,13 +105,23 @@ stores to prevent WebKit (Safari) transaction deadlocks/hangs.
 An optional <code>options.maxRetries</code> (default <code>5</code>) controls
 how often a failed write is retried with exponential backoff
 (200ms, 400ms, 800ms, ...) before the <code>retry-exhausted</code> event is
-emitted.
+emitted. Retrying then continues until a write succeeds, with the backoff
+capped at 30 s (<code>MAX_RETRY_BACKOFF_MS</code>). Every attempt offers the
+whole in-memory backlog, so retrying on a short cycle while the database
+keeps failing and the app keeps editing would make the work grow
+quadratically with the length of the failure; at the cap it is about 2
+attempts a minute. Any successful write (a flush, or the page-hide write)
+ends the failure episode and resets the backoff.
   </dd>
   <dt><b><code>provider.whenSynced: Promise&lt;IndexeddbPersistence&gt;</code></b></dt>
   <dd>
 A promise that resolves once the initial content has been loaded from the
 database (i.e. when the "synced" event fires). Note: if the provider is
 destroyed before the initial sync completes, this promise never settles.
+The stored rows are applied in one transaction. While the provider is the
+doc's only <code>'update'</code> listener (e.g. a network provider is created
+after <code>whenSynced</code>), it keeps Yjs from encoding that transaction
+into a document-sized update that it would only discard.
   </dd>
   <dt><b><code>provider.on('synced', function(idbPersistence: IndexeddbPersistence))</code></b></dt>
   <dd>
@@ -106,13 +135,18 @@ The "error" event is fired when a database transaction or operation fails
 (e.g. QuotaExceededError, aborted transaction). Failed update batches are
 kept in memory and retried; while the database keeps failing, unwritten
 updates accumulate in memory until a write succeeds or the provider is
-destroyed.
+destroyed. A stored update row that cannot be decoded (storage corruption,
+a bad <code>writeSnapshot</code> payload) is skipped and reported here; the
+remaining content still loads, "synced" still fires, and the next trim
+consolidates fully, deleting the bad row.
   </dd>
   <dt><b><code>provider.on('retry-exhausted', function(error: Error))</code></b></dt>
   <dd>
 The "retry-exhausted" event is fired when the write retry count has exceeded
 the configured <code>maxRetries</code> limit (5 by default) after persistent
-database transaction failures.
+database transaction failures. It fires once per failure episode: the
+provider keeps retrying at the capped backoff (and keeps emitting "error"
+for each failed attempt) until a write succeeds.
   </dd>
   <dt><b><code>provider.set(key: any, value: any): Promise&lt;any&gt;</code></b></dt>
   <dd>
@@ -133,9 +167,13 @@ Delete a stored value.
 Force-drain the buffered update queue immediately, bypassing the
 <code>writeDebounceMs</code> timer. Resolves once every pending update
 (including any that arrive while a write is in flight) has been committed, or
-immediately when the queue is idle. While a write keeps failing it waits for
-the scheduled backoff retry rather than hot-spinning, so callers that need a
-time bound should race it against a deadline.
+immediately when the queue is idle. While a write keeps failing it backs off
+between attempts rather than hot-spinning: it waits for the scheduled backoff
+retry until retries are exhausted (at the first failure with
+<code>maxRetries: 0</code>); after that it does not wait out the capped
+backoff but attempts at once and then on an exponential backoff of its own
+(200ms doubling to 3.2s). Callers that need a time bound should race it
+against a deadline.
   </dd>
   <dt><b><code>provider.destroy(): Promise</code></b></dt>
   <dd>

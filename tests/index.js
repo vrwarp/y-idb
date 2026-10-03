@@ -1,4 +1,36 @@
 import * as indexeddb from './y-idb.tests.js'
+import * as destroyBeforeOpen from './destroy-before-open.tests.js'
+import * as hydrationInitstate from './hydration-initstate.tests.js'
+import * as dbrefAbort from './dbref-abort.tests.js'
+import * as runnerSettle from './runner-settle.tests.js'
+import * as runnerSyncThrow from './runner-sync-throw.tests.js'
+import * as snapshotAtomicity from './snapshot-atomicity.tests.js'
+import * as openFailure from './open-failure.tests.js'
+import * as hydrationError from './hydration-error.tests.js'
+import * as unloadWrite from './unload-write.tests.js'
+import * as errorPayload from './error-payload.tests.js'
+import * as errorListener from './error-listener.tests.js'
+import * as pendingStructs from './pending-structs.tests.js'
+import * as corruptRow from './corrupt-row.tests.js'
+import * as corruptFlagAbort from './corrupt-flag-abort.tests.js'
+import * as snapshotErrors from './snapshot-errors.tests.js'
+import * as peerDeps from './peer-deps.tests.js'
+import * as lifecycleRunner from './lifecycle-runner.tests.js'
+import * as destroyTimers from './destroy-timers.tests.js'
+import * as flushBackoff from './flush-backoff.tests.js'
+import * as hydrationEncode from './hydration-encode.tests.js'
+import * as trimOwnRows from './trim-own-rows.tests.js'
+import * as trimFailure from './trim-failure.tests.js'
+import * as trimCommitAbort from './trim-commit-abort.tests.js'
+import * as trimWastedMerge from './trim-wasted-merge.tests.js'
+import * as flushRetryExhausted from './flush-retry-exhausted.tests.js'
+import * as benchHarness from './bench-harness.tests.js'
+import * as staleCursorAbort from './stale-cursor-abort.tests.js'
+import * as pagehideRunner from './pagehide-runner.tests.js'
+import * as visibilityDestroy from './visibility-destroy.tests.js'
+import * as yjsPeerFloor from './yjs-peer-floor.tests.js'
+import * as detachedUpdate from './detached-update.tests.js'
+import * as debounceRetryBackoff from './debounce-retry-backoff.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -8,7 +40,39 @@ if (isBrowser) {
   log.createVConsole(document.body)
 }
 runTests({
-  indexeddb
+  indexeddb,
+  destroyBeforeOpen,
+  hydrationInitstate,
+  dbrefAbort,
+  runnerSettle,
+  runnerSyncThrow,
+  snapshotAtomicity,
+  openFailure,
+  hydrationError,
+  unloadWrite,
+  errorPayload,
+  errorListener,
+  pendingStructs,
+  corruptRow,
+  corruptFlagAbort,
+  snapshotErrors,
+  peerDeps,
+  lifecycleRunner,
+  destroyTimers,
+  flushBackoff,
+  hydrationEncode,
+  trimOwnRows,
+  trimFailure,
+  trimCommitAbort,
+  trimWastedMerge,
+  flushRetryExhausted,
+  benchHarness,
+  staleCursorAbort,
+  pagehideRunner,
+  visibilityDestroy,
+  yjsPeerFloor,
+  detachedUpdate,
+  debounceRetryBackoff
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
