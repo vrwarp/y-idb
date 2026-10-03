@@ -1,8 +1,14 @@
 name: Mutation testing
 
 # Mutation testing runs the test suite once per mutant, so it is far too slow
-# for every push (the suite has no per-test coverage analysis here, so every mutant pays a full run). It runs weekly and on
-# demand instead; `npm run test:mutation` is the local equivalent.
+# for every push (the suite has no per-test coverage analysis here, so every
+# mutant pays a full run). It runs weekly and on demand instead;
+# `npm run test:mutation` is the local equivalent.
+#
+# In one job the run takes most of the job timeout (940 mutants at a full
+# suite run each), so the mutants are split across parallel shards
+# (stryker.shard.config.mjs) and the last job merges the shard reports and
+# applies the break threshold to the whole run.
 on:
   schedule:
     - cron: '0 4 * * 1'
@@ -10,9 +16,13 @@ on:
 
 jobs:
   stryker:
-    name: Stryker
+    name: Stryker (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +33,42 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run test:mutation
+      - run: npx stryker run stryker.shard.config.mjs
+        env:
+          STRYKER_SHARD: ${{ matrix.shard }}
+          STRYKER_SHARD_COUNT: ${{ strategy.job-total }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutation-shard-${{ matrix.shard }}
+          path: reports/mutation/shard-${{ matrix.shard }}.json
+
+  report:
+    name: Mutation score
+    needs: stryker
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-shard-*
+          path: reports/mutation
+          merge-multiple: true
+
+      - run: node scripts/mutation/merge-shards.mjs reports/mutation/shard-*.json
 
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
           name: mutation-report
-          path: reports/mutation
+          path: |
+            reports/mutation/index.html
+            reports/mutation/mutation.json
