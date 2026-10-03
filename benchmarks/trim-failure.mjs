@@ -24,8 +24,8 @@
  *  3. Quota pressure is simulated by aborting, at commit, every readwrite
  *     transaction that adds a row larger than LIMIT bytes (small flush rows
  *     still commit, the large trim row is rejected). The abort comes after
- *     every request has succeeded, so storeState() resolves and no 'error'
- *     is emitted, exactly like a commit-time QuotaExceededError.
+ *     every request has succeeded, exactly like a commit-time
+ *     QuotaExceededError.
  *  4. Counting starts at the first trim attempt; cumulative counters are
  *     sampled after CHECKPOINTS write events of failure.
  *

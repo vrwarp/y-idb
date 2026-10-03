@@ -173,7 +173,8 @@ export const testAbortedFullConsolidationKeepsOtherTabsLaterEdit = async tc => {
 
 /**
  * Same, for the incremental (delta-row) trim, aborted at commit time
- * (e.g. QuotaExceededError): storeState resolves, but nothing was written.
+ * (e.g. QuotaExceededError): every request succeeded, but nothing was
+ * written.
  *
  * @param {t.TestCase} tc
  */
@@ -202,8 +203,8 @@ export const testCommitAbortedIncrementalTrimKeepsOtherTabsLaterEdit = async tc 
     const { _dbref: dbref, _dbsize: dbsize } = pA
     const fault = abortNextWriteTransaction(tc.testName, 'commit')
     try {
-      // The abort comes after every request succeeded, so storeState itself
-      // resolves; only the transaction's abort event reports it.
+      // The abort comes after every request succeeded; storeState rejects
+      // with it.
       await storeState(pA, false).catch(() => {})
       await fault.whenDone
     } finally {

@@ -439,6 +439,17 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
   updatesStore.transaction.addEventListener('complete', () => {
     idbPersistence._trimFailures = 0
   })
+  // The chain below settles in its last request's callback, before the
+  // commit. Settle on the transaction's outcome instead, so a trim that
+  // aborts at commit (e.g. a QuotaExceededError) rejects rather than
+  // resolving as if it had been stored.
+  const committed = promise.create((resolve, reject) => {
+    const tx = updatesStore.transaction
+    tx.addEventListener('complete', () => resolve(undefined))
+    tx.addEventListener('abort', event => reject(transactionError(tx, event, 'trim transaction failed')))
+  })
+  // Unused when a failed request rejects the chain itself first.
+  committed.catch(() => {})
   if (onTransaction) onTransaction(updatesStore.transaction)
   // Count first: _dbref is read in a request callback (see
   // restoreCursorOnAbort).
@@ -585,7 +596,7 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
         })
       })
     })
-  })
+  }).then(() => committed)
 }
 
 /**
@@ -1308,11 +1319,12 @@ export class IndexeddbPersistence extends Observable {
   /**
    * The trim a flush arms once the store holds PREFERRED_TRIM_SIZE rows.
    * A failed attempt counts once towards `_trimFailures`, whether the
-   * transaction's 'abort' reports it (an abort at commit, e.g. a
-   * QuotaExceededError, does not reject: storeState resolves on the trim's
-   * last request) or the rejection does (a failing transactionRunner, a
-   * closing database; a failed request causes both). Only a committed trim
-   * resets it (see `_storeState`), not a successful flush.
+   * transaction's 'abort' reports it (the only report when a
+   * transactionRunner resolves before the commit) or the rejection does (a
+   * failing transactionRunner, a closing database; an aborted transaction,
+   * at commit too, causes both), and the rejection is emitted as 'error'.
+   * Only a committed trim resets `_trimFailures` (see `_storeState`), not a
+   * successful flush.
    */
   _trim () {
     let concluded = false

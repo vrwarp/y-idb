@@ -21,6 +21,7 @@ import * as flushBackoff from './flush-backoff.tests.js'
 import * as hydrationEncode from './hydration-encode.tests.js'
 import * as trimOwnRows from './trim-own-rows.tests.js'
 import * as trimFailure from './trim-failure.tests.js'
+import * as trimCommitAbort from './trim-commit-abort.tests.js'
 import * as trimWastedMerge from './trim-wasted-merge.tests.js'
 import * as flushRetryExhausted from './flush-retry-exhausted.tests.js'
 import * as benchHarness from './bench-harness.tests.js'
@@ -61,6 +62,7 @@ runTests({
   hydrationEncode,
   trimOwnRows,
   trimFailure,
+  trimCommitAbort,
   trimWastedMerge,
   flushRetryExhausted,
   benchHarness,

@@ -11,9 +11,7 @@
  * re-read and re-apply every row after the restored cursor, re-encode the
  * whole document (full consolidation) and offer the O(document) row again.
  * Nothing commits, so the backlog grows: one O(doc + rows) attempt per write
- * event, O(T^2) work over a failure that lasts T. A commit-time abort does
- * not even reject storeState() (its promise resolved on its last request),
- * so only the transaction's 'abort' event sees the failure.
+ * event, O(T^2) work over a failure that lasts T.
  *
  * The provider's own timers run on a virtual clock (setTimeout,
  * clearTimeout and Date.now are replaced; fake-indexeddb schedules with
@@ -95,8 +93,7 @@ const seedRows = async name => {
  *   no further one was issued), like a commit-time QuotaExceededError.
  * - `advance(ms)`: moves virtual time forward, firing due timers in order
  *   and letting the IndexedDB work each one starts settle.
- * - `settle()`: waits until no transaction is in flight (a storeState()
- *   promise resolves on its last request, before the commit).
+ * - `settle()`: waits until no transaction is in flight.
  * - `pendingTimers()`: number of armed virtual timers.
  *
  * @param {function({ c: TrimCounters, quota: { limit: number }, advance: function(number):Promise<void>, settle: function():Promise<void>, pendingTimers: function():number }):Promise<void>} fn
