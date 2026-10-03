@@ -30,6 +30,7 @@ import * as pagehideRunner from './pagehide-runner.tests.js'
 import * as visibilityDestroy from './visibility-destroy.tests.js'
 import * as yjsPeerFloor from './yjs-peer-floor.tests.js'
 import * as detachedUpdate from './detached-update.tests.js'
+import * as debounceRetryBackoff from './debounce-retry-backoff.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -70,7 +71,8 @@ runTests({
   pagehideRunner,
   visibilityDestroy,
   yjsPeerFloor,
-  detachedUpdate
+  detachedUpdate,
+  debounceRetryBackoff
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

@@ -1183,6 +1183,13 @@ export class IndexeddbPersistence extends Observable {
 
   _flush () {
     if (this._destroyed || this._writing || this._pendingUpdates.length === 0) return
+    // A failed flush armed a backoff retry that will reschedule. A debounce
+    // timer or microtask scheduled before the failure must not attempt the
+    // write inside the backoff: a second failure would arm another retry
+    // over the first, leaving that one untracked (two retry chains, and a
+    // timer destroy() cannot clear). flush() clears the retry before calling
+    // this when it bypasses the backoff on purpose.
+    if (this._retryTimeoutId !== null) return
     const db = this.db
     if (!db) {
       // Don't re-schedule here — the _db.then() callback in the constructor
@@ -1373,7 +1380,8 @@ export class IndexeddbPersistence extends Observable {
    * should race it against a deadline.
    *
    * A debounce timer that is already scheduled is left to fire: its
-   * `_flush()` no-ops once the queue has been drained here.
+   * `_flush()` no-ops once the queue has been drained here, or while a
+   * backoff retry is armed.
    *
    * @return {Promise<void>}
    */
@@ -1416,8 +1424,8 @@ export class IndexeddbPersistence extends Observable {
       if (this._retryTimeoutId !== null) {
         if (this._retryCount <= this._maxRetries) {
           // A backoff retry is armed (see `_onFlushFailed`) — wait for its
-          // `_scheduleFlush` to fire rather than bypassing the backoff by
-          // calling `_flush()` directly (which does not check the timer).
+          // `_scheduleFlush` to fire (`_flush()` declines to run while it is
+          // armed) rather than bypassing the backoff.
           await new Promise(resolve => setTimeout(resolve, 50))
           continue
         }
