@@ -28,6 +28,7 @@ import * as staleCursorAbort from './stale-cursor-abort.tests.js'
 import * as pagehideRunner from './pagehide-runner.tests.js'
 import * as visibilityDestroy from './visibility-destroy.tests.js'
 import * as yjsPeerFloor from './yjs-peer-floor.tests.js'
+import * as detachedUpdate from './detached-update.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -66,7 +67,8 @@ runTests({
   staleCursorAbort,
   pagehideRunner,
   visibilityDestroy,
-  yjsPeerFloor
+  yjsPeerFloor,
+  detachedUpdate
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {

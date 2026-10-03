@@ -161,6 +161,41 @@ const advanceCursorPastOwnRows = (idbPersistence, requests) => {
 }
 
 /**
+ * Add a batch of buffered updates to the updates store, in order, in the
+ * readwrite transaction `newTransaction` opens.
+ *
+ * add() throws synchronously when an update cannot be cloned, e.g. because
+ * another 'update' listener transferred its buffer (`postMessage(update,
+ * [update.buffer])`) while it was buffered. That does not abort the
+ * transaction: the adds before it would commit unaccounted for, and every
+ * retry of the batch would stop at the same update. Skipping the update is
+ * no way out either, as Yjs cannot apply this client's later updates
+ * without it. So that transaction is aborted and the doc's state, which
+ * covers every buffered update, is written in a new one instead. It
+ * replaces `batch` in place (a failure handler re-buffers it), and the
+ * caller reports `addError`.
+ *
+ * Throws, with nothing written, when a transaction cannot be opened.
+ *
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {() => IDBTransaction} newTransaction
+ * @param {Array<Uint8Array>} batch
+ * @return {{ tx: IDBTransaction, requests: Array<IDBRequest<IDBValidKey>>, addError: any }}
+ */
+const addBatch = (idbPersistence, newTransaction, batch) => {
+  const tx = newTransaction()
+  const store = tx.objectStore(updatesStoreName)
+  try {
+    return { tx, requests: batch.map(update => store.add(update)), addError: null }
+  } catch (addError) {
+    tx.abort()
+    batch.splice(0, batch.length, Y.encodeStateAsUpdate(idbPersistence.doc))
+    const stateTx = newTransaction()
+    return { tx: stateTx, requests: [stateTx.objectStore(updatesStoreName).add(batch[0])], addError }
+  }
+}
+
+/**
  * The error that failed `tx`, for its `error`/`abort` handlers. A failing
  * request's bubbling 'error' event reaches the transaction BEFORE the abort
  * steps set `tx.error`, so fall back to the error of the request the event
@@ -965,7 +1000,8 @@ export class IndexeddbPersistence extends Observable {
      * @return {Promise<void>}
      */
     this._unloadListener = () => {
-      if (!this.db) {
+      const db = this.db
+      if (!db) {
         return Promise.resolve()
       }
       // Captured up front: a listener running on an already destroyed
@@ -1012,9 +1048,7 @@ export class IndexeddbPersistence extends Observable {
         settle()
       }
       try {
-        const tx = this.db.transaction([updatesStoreName], 'readwrite')
-        const store = tx.objectStore(updatesStoreName)
-        const requests = batch.map(update => store.add(update))
+        const { tx, requests, addError } = addBatch(this, () => db.transaction([updatesStoreName], 'readwrite'), batch)
         tx.oncomplete = () => {
           this._dbsize += batch.length
           advanceCursorPastOwnRows(this, requests)
@@ -1035,6 +1069,9 @@ export class IndexeddbPersistence extends Observable {
           handled = true
           onFailed(transactionError(tx, event, 'page-hide write failed'))
         }
+        // Isolated: a throwing listener must not reach the catch below and
+        // hand back the batch the transaction is writing.
+        if (addError !== null) emitIsolated(this, 'error', [addError])
       } catch (e) {
         onFailed(e)
       }
@@ -1192,18 +1229,17 @@ export class IndexeddbPersistence extends Observable {
         return
       }
       /**
-       * @type {IDBTransaction}
+       * @type {ReturnType<typeof addBatch>}
        */
-      let tx
+      let added
       try {
-        tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
+        added = addBatch(this, () => db.transaction([updatesStoreName], 'readwrite', { durability: this.durability }), batch)
       } catch (e) {
         onFailed(e)
         resolve(undefined)
         return
       }
-      const store = tx.objectStore(updatesStoreName)
-      const requests = batch.map(update => store.add(update))
+      const { tx, requests, addError } = added
       tx.oncomplete = () => {
         concluded = true
         this._retryCount = 0
@@ -1246,6 +1282,7 @@ export class IndexeddbPersistence extends Observable {
       // From here on only the transaction's outcome concludes the attempt.
       txUnderWay = true
       this._takeQueuedFlush = null
+      if (addError !== null) emitIsolated(this, 'error', [addError])
     })).then(() => {
       // The runner resolved without the work getting its transaction under
       // way (it skipped the work, or runs it only later): nothing else will
@@ -1449,11 +1486,7 @@ export class IndexeddbPersistence extends Observable {
           const batch = this._pendingUpdates.splice(0, this._pendingUpdates.length)
           return transactWrite(this, () => new Promise((resolve) => {
             try {
-              const tx = db.transaction([updatesStoreName], 'readwrite', { durability: this.durability })
-              const store = tx.objectStore(updatesStoreName)
-              for (let i = 0; i < batch.length; i++) {
-                store.add(batch[i])
-              }
+              const { tx, addError } = addBatch(this, () => db.transaction([updatesStoreName], 'readwrite', { durability: this.durability }), batch)
               tx.oncomplete = () => resolve(undefined)
               let handled = false
               tx.onerror = tx.onabort = event => {
@@ -1466,6 +1499,7 @@ export class IndexeddbPersistence extends Observable {
                 }
                 resolve(undefined)
               }
+              if (addError !== null) emitIsolated(this, 'error', [addError])
             } catch (e) {
               emitIsolated(this, 'error', [e])
               resolve(undefined)
