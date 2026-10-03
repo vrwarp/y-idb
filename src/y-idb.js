@@ -114,7 +114,13 @@ const transactWrite = (idbPersistence, work) => runTransaction(idbPersistence.tr
  *
  * Call it from the transaction's first request callback: every earlier
  * transaction on the store has finished by then (and run its own restore),
- * so the snapshot holds committed values only.
+ * so the snapshot holds committed values only. Read `_dbref` for the
+ * transaction's catch-up read there too, not when the transaction is
+ * created: an earlier trim or fetch of this provider may still be running
+ * then (a serializing transactionRunner releases its lock on the work's
+ * last request callback, before commit), and if it aborts, a read bounded
+ * by the value it advanced to skips the row another tab writes at the
+ * reverted key.
  *
  * @param {IndexeddbPersistence} idbPersistence
  * @param {IDBTransaction} tx
@@ -297,10 +303,15 @@ const _fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback, afterApplyUpd
     })
   }
   const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName], 'readwrite')
-  return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false))).then(updates => {
+  // Any first request will do: its callback is where _dbref may be read
+  // (see restoreCursorOnAbort).
+  return getLastKey(updatesStore).then(() => {
     if (idbPersistence._destroyed) return
     // getLastKey below can return the uncommitted initial-state row.
     restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
+    return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false)))
+  }).then(updates => {
+    if (idbPersistence._destroyed) return
     if (beforeApplyUpdatesCallback) beforeApplyUpdatesCallback(updatesStore)
     applyStoredUpdates(idbPersistence, updates)
     if (afterApplyUpdatesCallback) afterApplyUpdatesCallback(updatesStore)
@@ -386,7 +397,6 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
     })
   }
   const db = /** @type {IDBDatabase} */ (idbPersistence.db)
-  const prevDbref = idbPersistence._dbref
   const [updatesStore, customStore] = idb.transact(db, [updatesStoreName, customStoreName], 'readwrite')
   // Any committed trim, explicit ones included, ends the backoff of failed
   // ones (see `_trim`).
@@ -394,16 +404,19 @@ const _storeState = (idbPersistence, forceStore, onTransaction) => {
     idbPersistence._trimFailures = 0
   })
   if (onTransaction) onTransaction(updatesStore.transaction)
-  // Fetch (and apply) rows we have not seen yet — they may have been
-  // written by another tab.
-  return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(prevDbref, false))).then(newRows => {
+  // Count first: _dbref is read in a request callback (see
+  // restoreCursorOnAbort).
+  return rtop(updatesStore.count()).then(cnt => {
     if (idbPersistence._destroyed) return
     // The trims below advance _dbref past their own, uncommitted row.
     restoreCursorOnAbort(idbPersistence, updatesStore.transaction)
-    applyStoredUpdates(idbPersistence, newRows)
-    return rtop(updatesStore.count()).then(cnt => {
+    idbPersistence._dbsize = cnt
+    const prevDbref = idbPersistence._dbref
+    // Fetch (and apply) rows we have not seen yet — they may have been
+    // written by another tab.
+    return rtop(updatesStore.getAll(idb.createIDBKeyRangeLowerBound(prevDbref, false))).then(newRows => {
       if (idbPersistence._destroyed) return
-      idbPersistence._dbsize = cnt
+      applyStoredUpdates(idbPersistence, newRows)
       if (!forceStore && cnt < PREFERRED_TRIM_SIZE) {
         // Nothing to trim; just advance the cursor past what was applied.
         return getLastKey(updatesStore).then(lastKey => {

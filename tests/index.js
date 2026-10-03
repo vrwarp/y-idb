@@ -23,6 +23,7 @@ import * as trimFailure from './trim-failure.tests.js'
 import * as trimWastedMerge from './trim-wasted-merge.tests.js'
 import * as flushRetryExhausted from './flush-retry-exhausted.tests.js'
 import * as benchHarness from './bench-harness.tests.js'
+import * as staleCursorAbort from './stale-cursor-abort.tests.js'
 
 import { runTests } from 'lib0/testing.js'
 import { isBrowser, isNode } from 'lib0/environment.js'
@@ -56,7 +57,8 @@ runTests({
   trimFailure,
   trimWastedMerge,
   flushRetryExhausted,
-  benchHarness
+  benchHarness,
+  staleCursorAbort
 }).then(success => {
   /* istanbul ignore next */
   if (isNode) {
