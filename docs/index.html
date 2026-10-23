@@ -594,10 +594,12 @@ provider.on('synced', () => {
     let pendingUpdates = [];
     let writing = false;
     let flushScheduled = false;
+    let retryArmed = false;
     let dbRows = 0;
     let updateIdCounter = 1;
     let retryCount = 0;
     const maxRetries = 5;
+    const maxRetryBackoffMs = 30000;
 
     const debounceInput = document.getElementById('debounce');
     const errCheck = document.getElementById('err-check');
@@ -645,7 +647,7 @@ provider.on('synced', () => {
     }
 
     function scheduleFlush() {
-      if (flushScheduled || writing || pendingUpdates.length === 0) return;
+      if (flushScheduled || writing || retryArmed || pendingUpdates.length === 0) return;
       flushScheduled = true;
       log(`Scheduling flush...`, 'info');
       
@@ -700,21 +702,18 @@ provider.on('synced', () => {
           updateUI();
 
           retryCount++;
-          if (retryCount <= maxRetries) {
-            const backoff = Math.pow(2, retryCount) * 100;
-            log(`Failed batch prepended back to memory buffer. Retry ${retryCount}/${maxRetries} in ${backoff}ms (exponential backoff).`, 'error');
-            setTimeout(() => {
-              pipelineBox.classList.remove('stage-box-error');
-              pipelineStatus.className = 'status-idle';
-              pipelineStatus.textContent = 'Idle';
-              scheduleFlush();
-            }, backoff);
-          } else {
-            retryCount = 0;
-            log(`Retry limit exceeded. Emitting 'retry-exhausted' event. Updates stay buffered until the next document update.`, 'error');
+          const backoff = Math.min(Math.pow(2, retryCount) * 100, maxRetryBackoffMs);
+          log(`Failed batch prepended back to memory buffer. Retry ${retryCount} in ${backoff}ms (exponential backoff).`, 'error');
+          retryArmed = true;
+          setTimeout(() => {
+            retryArmed = false;
             pipelineBox.classList.remove('stage-box-error');
             pipelineStatus.className = 'status-idle';
             pipelineStatus.textContent = 'Idle';
+            scheduleFlush();
+          }, backoff);
+          if (retryCount === maxRetries + 1) {
+            log(`Retry limit exceeded. Emitting 'retry-exhausted' event. Retrying continues at the capped backoff until a write succeeds.`, 'error');
           }
         } else {
           retryCount = 0;
