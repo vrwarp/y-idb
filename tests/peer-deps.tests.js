@@ -23,6 +23,27 @@ const rangeRequiresMergeUpdates = range => {
 }
 
 /**
+ * The range helper decides which peer ranges the package tests accept, so
+ * pin its lower-bound arithmetic (also used by yjs-peer-floor.tests.js).
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testMinAdmittedVersion = async _tc => {
+  t.compare(minAdmittedVersion('^13.5.0'), { version: [13, 5, 0], exclusive: false })
+  t.compare(minAdmittedVersion('>13.4.0'), { version: [13, 4, 0], exclusive: true })
+  t.compare(minAdmittedVersion('>=13.5.0 <14.0.0'), { version: [13, 5, 0], exclusive: false })
+  t.compare(minAdmittedVersion('13.5.0 - 13.99.0'), { version: [13, 5, 0], exclusive: false })
+  t.compare(minAdmittedVersion('13.x'), { version: [13, 0, 0], exclusive: false })
+  t.compare(minAdmittedVersion('*'), { version: [0, 0, 0], exclusive: false })
+  // The lowest alternative wins; at equal versions the inclusive bound does.
+  t.compare(minAdmittedVersion('^13.6.0 || ^13.5.10'), { version: [13, 5, 10], exclusive: false })
+  t.compare(minAdmittedVersion('>13.5.0 || ^13.5.0'), { version: [13, 5, 0], exclusive: false })
+  t.assert(compareVersions([13, 5, 0], [13, 4, 14]) > 0)
+  t.assert(compareVersions([13, 5, 0], [14, 0, 0]) < 0)
+  t.assert(compareVersions([13, 5, 0], [13, 5, 0]) === 0)
+}
+
+/**
  * The yjs peer range must not admit releases that lack `Y.mergeUpdates`.
  *
  * On yjs 13.0–13.4 the namespace import has no `mergeUpdates`, so readSnapshot
