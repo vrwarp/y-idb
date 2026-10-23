@@ -20,7 +20,11 @@ npm i --save y-idb
 ```
 
 ```js
-const provider = new IndexeddbPersistence(docName, ydoc)
+import * as Y from 'yjs'
+import { IndexeddbPersistence } from 'y-idb'
+
+const ydoc = new Y.Doc()
+const provider = new IndexeddbPersistence('room-name', ydoc)
 
 provider.on('synced', () => {
   console.log('content from the database is loaded')
@@ -54,11 +58,12 @@ ONE delta row with <code>Y.mergeUpdates</code> — O(new updates) work — so
 trim latency and bytes written stay flat as the document ages. A <i>full
 consolidation</i> (re-encode the whole document into a single row, which
 also drops content Yjs has garbage-collected in memory) runs only when
-delta rows have accumulated: more than <code>options.trimSegmentRows</code>
-(default 24) of them, or more delta bytes (the fresh tail counted at its
-stored size) than max(<code>options.trimFullCompactBytes</code> (default
-1 MiB), the base row's size) — bounding the database at roughly 2&times;
-the consolidated document size. Both checks run before the tail is merged,
+delta rows have accumulated: when the trim would write the
+<code>options.trimSegmentRows</code>-th (default 24th) of them, or when the
+delta bytes (the fresh tail counted at its stored size) would reach
+max(<code>options.trimFullCompactBytes</code> (default 1 MiB), the base
+row's size) — bounding the database at roughly 2&times; the consolidated
+document size. Both checks run before the tail is merged,
 the row check before it is even read, so a full consolidation never also
 merges a tail it would discard: on the aging benchmark (1–2.4 MB document)
 that takes ~20 ms (30–40%) off each full trim's longest main-thread task,
