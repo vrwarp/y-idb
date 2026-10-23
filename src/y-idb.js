@@ -42,6 +42,18 @@ const MAX_TRIM_BACKOFF_EXPONENT = 8
 export const MAX_RETRY_BACKOFF_MS = 30_000
 
 /**
+ * Backoff before the first retry of a failed flush; it doubles with every
+ * further failure (see `_onFlushFailed`).
+ */
+const RETRY_BACKOFF_BASE_MS = 100
+
+/**
+ * Byte length of the update Yjs encodes for an empty document: a state that
+ * holds no content, so there is nothing worth writing.
+ */
+const EMPTY_UPDATE_BYTES = 2
+
+/**
  * IDB request to promise. Used instead of lib0's request wrappers, which
  * reject with `new Error(domException)` (name 'Error', the real name folded
  * into the message) or, for cursors, with the raw error Event. This rejects
@@ -888,7 +900,7 @@ export class IndexeddbPersistence extends Observable {
        */
       const beforeApplyUpdatesCallback = (updatesStore) => {
         const initUpdate = Y.encodeStateAsUpdate(doc)
-        if (initUpdate.length > 2) {
+        if (initUpdate.length > EMPTY_UPDATE_BYTES) {
           // Use the raw request instead of the lib0 promise wrapper: the
           // promise would be discarded, so a transaction failure would
           // surface as an unhandled rejection instead of the tx error event.
@@ -1170,7 +1182,7 @@ export class IndexeddbPersistence extends Observable {
     emitIsolated(this, 'error', [err])
     if (!this._destroyed) {
       this._retryCount++
-      const backoff = Math.min(Math.pow(2, this._retryCount) * 100, MAX_RETRY_BACKOFF_MS)
+      const backoff = Math.min(Math.pow(2, this._retryCount) * RETRY_BACKOFF_BASE_MS, MAX_RETRY_BACKOFF_MS)
       this._retryTimeoutId = setTimeout(() => {
         this._retryTimeoutId = null
         this._scheduleFlush()
@@ -1402,7 +1414,7 @@ export class IndexeddbPersistence extends Observable {
     const backOffIfExhausted = async failedBefore => {
       if (this._failedFlushes === failedBefore || this._retryCount <= this._maxRetries || this._destroyed) return
       exhaustedFailures++
-      const backoff = Math.pow(2, Math.min(exhaustedFailures, 5)) * 100
+      const backoff = Math.pow(2, Math.min(exhaustedFailures, 5)) * RETRY_BACKOFF_BASE_MS
       await new Promise(resolve => setTimeout(resolve, backoff))
     }
     for (;;) {
@@ -1500,7 +1512,7 @@ export class IndexeddbPersistence extends Observable {
           // decode without it. Write the whole doc state instead; it covers
           // every buffered update (and the re-queued initial state).
           const initUpdate = Y.encodeStateAsUpdate(this.doc)
-          if (initUpdate.length > 2) {
+          if (initUpdate.length > EMPTY_UPDATE_BYTES) {
             this._pendingUpdates = [initUpdate]
           }
         }
