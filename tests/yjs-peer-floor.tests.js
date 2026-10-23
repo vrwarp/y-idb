@@ -25,84 +25,13 @@ import * as Y from 'yjs'
 import * as t from 'lib0/testing.js'
 import { isNode } from 'lib0/environment.js'
 import { clearDocument } from '../src/y-idb.js'
+import { compareVersions, minAdmittedVersion } from './semver-range.js'
 
 /**
  * The first yjs release whose public namespace exports
  * `Y.convertUpdateFormatV2ToV1` (13.5.22 defines it but does not export it).
  */
 const FIRST_YJS_EXPORTING_V2_TO_V1 = [13, 5, 23]
-
-/**
- * @param {Array<number>} a
- * @param {Array<number>} b
- * @return {number}
- */
-const compareVersions = (a, b) => {
-  for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i]
-  }
-  return 0
-}
-
-/**
- * Lower bound of a single (possibly partial / x-range) version, ignoring
- * any prerelease or build suffix.
- *
- * @param {string} version
- * @return {Array<number>}
- */
-const parseLowerVersion = version => {
-  const parts = version.split(/[-+]/)[0].split('.')
-  return [0, 1, 2].map(i => {
-    const n = Number.parseInt(parts[i], 10)
-    return Number.isNaN(n) ? 0 : n
-  })
-}
-
-/**
- * The smallest version an npm semver range admits, and whether that bound
- * is exclusive (`>x.y.z`). Handles `||`, space-separated comparator sets,
- * hyphen ranges, `^`, `~`, `>=`, `>`, `<`, `<=`, `=` and x-ranges.
- *
- * @param {string} range
- * @return {{ version: Array<number>, exclusive: boolean }}
- */
-const minAdmittedVersion = range => {
-  /** @type {{ version: Array<number>, exclusive: boolean } | null} */
-  let min = null
-  for (const alternative of range.split('||')) {
-    const tokens = alternative.trim().replace(/([<>=~^]+)\s+/g, '$1').split(/\s+/).filter(s => s.length > 0)
-    /** @type {{ version: Array<number>, exclusive: boolean }} */
-    let lower = { version: [0, 0, 0], exclusive: false }
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i]
-      if (tokens[i + 1] === '-') {
-        // hyphen range `a - b`: lower bound is `a`
-        i += 2
-      }
-      const match = /^(<=|>=|<|>|=|\^|~>?|v)?v?(.*)$/.exec(token)
-      const op = match ? match[1] || '' : ''
-      const rest = match ? match[2] : token
-      if (op === '<' || op === '<=' || rest === '*' || rest === '' || /^[xX*]/.test(rest)) {
-        continue
-      }
-      const candidate = { version: parseLowerVersion(rest), exclusive: op === '>' }
-      const cmp = compareVersions(candidate.version, lower.version)
-      if (cmp > 0 || (cmp === 0 && candidate.exclusive)) {
-        lower = candidate
-      }
-    }
-    if (min === null) {
-      min = lower
-    } else {
-      const cmp = compareVersions(lower.version, min.version)
-      if (cmp < 0 || (cmp === 0 && !lower.exclusive)) {
-        min = lower
-      }
-    }
-  }
-  return min || { version: [0, 0, 0], exclusive: false }
-}
 
 /**
  * Whether `range` admits a yjs release that does not export

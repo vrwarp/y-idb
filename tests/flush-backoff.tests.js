@@ -37,26 +37,32 @@ export const testFlushBacksOffWhenRetriesAreExhausted = async tc => {
   }
   const provider = new IndexeddbPersistence(name, doc, { maxRetries: 0, transactionRunner })
   await provider.whenSynced
-  let errors = 0
-  provider.on('error', () => { errors++ })
+  try {
+    let errors = 0
+    provider.on('error', () => { errors++ })
 
-  failuresLeft = 1000
-  doc.getMap('m').set('a', 1)
-  let flushed = false
-  const flushing = provider.flush().then(() => { flushed = true })
+    failuresLeft = 1000
+    doc.getMap('m').set('a', 1)
+    let flushed = false
+    const flushing = provider.flush().then(() => { flushed = true })
 
-  // A timer must get to run while the database keeps failing.
-  await new Promise(resolve => setTimeout(resolve, 20))
-  t.assert(!flushed, 'flush() resolved only after spinning through every failure without yielding to timers')
-  t.assert(errors <= 2, `flush() retried ${errors} times within 20ms instead of backing off`)
+    // A timer must get to run while the database keeps failing.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    t.assert(!flushed, 'flush() resolved only after spinning through every failure without yielding to timers')
+    t.assert(errors <= 2, `flush() retried ${errors} times within 20ms instead of backing off`)
 
-  // Once the database recovers, flush() still drains the queue.
-  failuresLeft = 0
-  await flushing
-  const update = await readSnapshot(name)
-  t.assert(update !== null)
-  const reloaded = new Y.Doc()
-  Y.applyUpdate(reloaded, /** @type {Uint8Array} */ (update))
-  t.compare(reloaded.getMap('m').get('a'), 1)
-  await provider.destroy()
+    // Once the database recovers, flush() still drains the queue.
+    failuresLeft = 0
+    await flushing
+    const update = await readSnapshot(name)
+    t.assert(update !== null)
+    const reloaded = new Y.Doc()
+    Y.applyUpdate(reloaded, /** @type {Uint8Array} */ (update))
+    t.compare(reloaded.getMap('m').get('a'), 1)
+  } finally {
+    // Stop the failing runner so a failed assertion cannot leave the provider
+    // retrying (and its backoff timers armed) into later tests.
+    failuresLeft = 0
+    await provider.destroy()
+  }
 }

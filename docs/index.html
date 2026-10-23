@@ -466,8 +466,8 @@ provider.on('synced', () => {
         <h2>API Reference</h2>
         
         <div class="api-entry">
-          <div class="api-sig">new IndexeddbPersistence(docName: string, ydoc: Y.Doc, options?: { writeDebounceMs?: number, durability?: 'default' | 'relaxed', transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;, maxRetries?: number })</div>
-          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask). <code>durability</code> (default <code>'default'</code>) is passed to IndexedDB transactions; <code>'relaxed'</code> can significantly improve write throughput. <code>transactionRunner</code> wraps every internal write transaction except the immediate <code>pagehide</code> write, e.g. to serialize writes across databases with a global lock. <code>maxRetries</code> (default <code>5</code>) caps the exponential-backoff retries of failed writes.</p>
+          <div class="api-sig">new IndexeddbPersistence(docName: string, ydoc: Y.Doc, options?: { writeDebounceMs?: number, durability?: 'default' | 'relaxed', transactionRunner?: &lt;T&gt;(work: () =&gt; Promise&lt;T&gt;) =&gt; Promise&lt;T&gt;, maxRetries?: number, trimSegmentRows?: number, trimFullCompactBytes?: number })</div>
+          <p>Creates a persistence provider instance. <code>docName</code> acts as the unique IndexedDB database store key. The optional <code>writeDebounceMs</code> sets the aggregation window (defaults to <code>0</code>, which schedules flushes immediately on the next microtask). <code>durability</code> (default <code>'default'</code>) is passed to IndexedDB transactions; <code>'relaxed'</code> can significantly improve write throughput. <code>transactionRunner</code> wraps every internal write transaction except the immediate <code>pagehide</code> write, e.g. to serialize writes across databases with a global lock. <code>maxRetries</code> (default <code>5</code>) is the number of exponential-backoff retries of a failed write before <code>retry-exhausted</code> is emitted. <code>trimSegmentRows</code> (default <code>24</code>) and <code>trimFullCompactBytes</code> (default 1&nbsp;MiB) bound how many delta rows and bytes the tiered trim accumulates before it forces a full consolidation of the updates store.</p>
         </div>
 
         <div class="api-entry">
@@ -482,12 +482,12 @@ provider.on('synced', () => {
 
         <div class="api-entry">
           <div class="api-sig">provider.on('error', (err: Error) => void)</div>
-          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted and no further retry is scheduled until the next document update. A stored update row that cannot be decoded is skipped and reported here; the remaining content still loads, <code>synced</code> still fires, and the next trim consolidates fully, deleting the bad row.</p>
+          <p>Emitted when a transaction or query fails (e.g. storage is full). Failed updates are preserved in memory and retried with exponential backoff (200ms, 400ms, 800ms, ...). After <code>maxRetries</code> failures (5 by default) the <code>retry-exhausted</code> event is emitted once; retrying then continues with the backoff capped at 30&nbsp;s until a write succeeds. A stored update row that cannot be decoded is skipped and reported here; the remaining content still loads, <code>synced</code> still fires, and the next trim consolidates fully, deleting the bad row.</p>
         </div>
 
         <div class="api-entry">
           <div class="api-sig">provider.on('retry-exhausted', (err: Error) => void)</div>
-          <p>Emitted when a failed write has been retried <code>maxRetries</code> times without success. The updates stay buffered in memory; the next document update triggers a fresh write attempt.</p>
+          <p>Emitted once per failure episode, when a failed write has been retried <code>maxRetries</code> times without success. The updates stay buffered in memory and the provider keeps retrying at the capped backoff (emitting <code>error</code> for each failed attempt) until a write succeeds.</p>
         </div>
 
         <div class="api-entry">
@@ -594,10 +594,12 @@ provider.on('synced', () => {
     let pendingUpdates = [];
     let writing = false;
     let flushScheduled = false;
+    let retryArmed = false;
     let dbRows = 0;
     let updateIdCounter = 1;
     let retryCount = 0;
     const maxRetries = 5;
+    const maxRetryBackoffMs = 30000;
 
     const debounceInput = document.getElementById('debounce');
     const errCheck = document.getElementById('err-check');
@@ -645,7 +647,7 @@ provider.on('synced', () => {
     }
 
     function scheduleFlush() {
-      if (flushScheduled || writing || pendingUpdates.length === 0) return;
+      if (flushScheduled || writing || retryArmed || pendingUpdates.length === 0) return;
       flushScheduled = true;
       log(`Scheduling flush...`, 'info');
       
@@ -700,21 +702,18 @@ provider.on('synced', () => {
           updateUI();
 
           retryCount++;
-          if (retryCount <= maxRetries) {
-            const backoff = Math.pow(2, retryCount) * 100;
-            log(`Failed batch prepended back to memory buffer. Retry ${retryCount}/${maxRetries} in ${backoff}ms (exponential backoff).`, 'error');
-            setTimeout(() => {
-              pipelineBox.classList.remove('stage-box-error');
-              pipelineStatus.className = 'status-idle';
-              pipelineStatus.textContent = 'Idle';
-              scheduleFlush();
-            }, backoff);
-          } else {
-            retryCount = 0;
-            log(`Retry limit exceeded. Emitting 'retry-exhausted' event. Updates stay buffered until the next document update.`, 'error');
+          const backoff = Math.min(Math.pow(2, retryCount) * 100, maxRetryBackoffMs);
+          log(`Failed batch prepended back to memory buffer. Retry ${retryCount} in ${backoff}ms (exponential backoff).`, 'error');
+          retryArmed = true;
+          setTimeout(() => {
+            retryArmed = false;
             pipelineBox.classList.remove('stage-box-error');
             pipelineStatus.className = 'status-idle';
             pipelineStatus.textContent = 'Idle';
+            scheduleFlush();
+          }, backoff);
+          if (retryCount === maxRetries + 1) {
+            log(`Retry limit exceeded. Emitting 'retry-exhausted' event. Retrying continues at the capped backoff until a write succeeds.`, 'error');
           }
         } else {
           retryCount = 0;

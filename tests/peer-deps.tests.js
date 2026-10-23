@@ -3,6 +3,7 @@
 import * as Y from 'yjs'
 import * as t from 'lib0/testing.js'
 import { isNode } from 'lib0/environment.js'
+import { compareVersions, minAdmittedVersion } from './semver-range.js'
 
 /**
  * `Y.mergeUpdates` first shipped in yjs 13.5.0 (13.4.14 is the last release
@@ -13,85 +14,33 @@ import { isNode } from 'lib0/environment.js'
 const FIRST_YJS_WITH_MERGE_UPDATES = [13, 5, 0]
 
 /**
- * @param {Array<number>} a
- * @param {Array<number>} b
- * @return {number}
- */
-const compareVersions = (a, b) => {
-  for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i]
-  }
-  return 0
-}
-
-/**
- * Lower bound of a single version (partial versions and x-ranges included:
- * `13`, `13.x`, `13.5`, `13.5.*`), ignoring any prerelease/build suffix.
- *
- * @param {string} version
- * @return {Array<number>}
- */
-const parseLowerVersion = version => {
-  const parts = version.split(/[-+]/)[0].split('.')
-  return [0, 1, 2].map(i => {
-    const n = Number.parseInt(parts[i], 10)
-    return Number.isNaN(n) ? 0 : n
-  })
-}
-
-/**
- * The smallest version a semver range admits, together with whether that
- * bound is exclusive (`>x.y.z`). Supports the npm range grammar used in
- * package.json files: `||` alternatives, space-separated comparator sets,
- * hyphen ranges, `^`, `~`, `>=`, `>`, `<`, `<=`, `=` and x-ranges.
- *
- * @param {string} range
- * @return {{ version: Array<number>, exclusive: boolean }}
- */
-const minAdmittedVersion = range => {
-  /** @type {{ version: Array<number>, exclusive: boolean } | null} */
-  let min = null
-  for (const alternative of range.split('||')) {
-    const tokens = alternative.trim().replace(/([<>=~^]+)\s+/g, '$1').split(/\s+/).filter(s => s.length > 0)
-    /** @type {{ version: Array<number>, exclusive: boolean }} */
-    let lower = { version: [0, 0, 0], exclusive: false }
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i]
-      if (tokens[i + 1] === '-') {
-        // hyphen range `a - b`: lower bound is `a`
-        i += 2
-      }
-      const match = /^(<=|>=|<|>|=|\^|~>?|v)?v?(.*)$/.exec(token)
-      const op = match ? match[1] || '' : ''
-      const rest = match ? match[2] : token
-      if (op === '<' || op === '<=' || rest === '*' || rest === '' || /^[xX*]/.test(rest)) {
-        continue
-      }
-      const candidate = { version: parseLowerVersion(rest), exclusive: op === '>' }
-      const cmp = compareVersions(candidate.version, lower.version)
-      if (cmp > 0 || (cmp === 0 && candidate.exclusive)) {
-        lower = candidate
-      }
-    }
-    if (min === null) {
-      min = lower
-    } else {
-      const cmp = compareVersions(lower.version, min.version)
-      if (cmp < 0 || (cmp === 0 && !lower.exclusive)) {
-        min = lower
-      }
-    }
-  }
-  return min || { version: [0, 0, 0], exclusive: false }
-}
-
-/**
  * @param {string} range
  * @return {boolean}
  */
 const rangeRequiresMergeUpdates = range => {
   const { version } = minAdmittedVersion(range)
   return compareVersions(version, FIRST_YJS_WITH_MERGE_UPDATES) >= 0
+}
+
+/**
+ * The range helper decides which peer ranges the package tests accept, so
+ * pin its lower-bound arithmetic (also used by yjs-peer-floor.tests.js).
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testMinAdmittedVersion = async _tc => {
+  t.compare(minAdmittedVersion('^13.5.0'), { version: [13, 5, 0], exclusive: false })
+  t.compare(minAdmittedVersion('>13.4.0'), { version: [13, 4, 0], exclusive: true })
+  t.compare(minAdmittedVersion('>=13.5.0 <14.0.0'), { version: [13, 5, 0], exclusive: false })
+  t.compare(minAdmittedVersion('13.5.0 - 13.99.0'), { version: [13, 5, 0], exclusive: false })
+  t.compare(minAdmittedVersion('13.x'), { version: [13, 0, 0], exclusive: false })
+  t.compare(minAdmittedVersion('*'), { version: [0, 0, 0], exclusive: false })
+  // The lowest alternative wins; at equal versions the inclusive bound does.
+  t.compare(minAdmittedVersion('^13.6.0 || ^13.5.10'), { version: [13, 5, 10], exclusive: false })
+  t.compare(minAdmittedVersion('>13.5.0 || ^13.5.0'), { version: [13, 5, 0], exclusive: false })
+  t.assert(compareVersions([13, 5, 0], [13, 4, 14]) > 0)
+  t.assert(compareVersions([13, 5, 0], [14, 0, 0]) < 0)
+  t.assert(compareVersions([13, 5, 0], [13, 5, 0]) === 0)
 }
 
 /**
