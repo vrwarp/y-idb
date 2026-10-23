@@ -856,7 +856,9 @@ export class IndexeddbPersistence extends Observable {
       const emitSynced = () => {
         if (this._destroyed) return
         this.synced = true
-        this.emit('synced', [this])
+        // Isolated: a throwing listener must not skip scheduling the flush of
+        // the updates buffered while hydrating.
+        emitIsolated(this, 'synced', [this])
         this._scheduleFlush()
       }
       /**
