@@ -57,6 +57,20 @@ const rtop = request => promise.create((resolve, reject) => {
 })
 
 /**
+ * Open (creating it on first use) database `name` with this module's store
+ * layout: an autoIncrement updates store and a custom key-value store.
+ *
+ * @param {string} name
+ * @return {Promise<IDBDatabase>}
+ */
+const openDatabase = name => idb.openDB(name, db =>
+  idb.createStores(db, [
+    [updatesStoreName, { autoIncrement: true }],
+    [customStoreName]
+  ])
+)
+
+/**
  * @param {IDBObjectStore} store
  * @return {Promise<any>} The highest key, or null if the store is empty
  */
@@ -623,12 +637,7 @@ export const clearDocument = name => idb.deleteDB(name)
  * @return {Promise<Uint8Array|null>}
  */
 export const readSnapshot = (name, { transactionRunner } = {}) => {
-  const work = () => idb.openDB(name, db =>
-    idb.createStores(db, [
-      ['updates', { autoIncrement: true }],
-      ['custom']
-    ])
-  ).then(db => new Promise((resolve, reject) => {
+  const work = () => openDatabase(name).then(db => new Promise((resolve, reject) => {
     /**
      * @type {IDBTransaction}
      */
@@ -691,12 +700,7 @@ export const readSnapshot = (name, { transactionRunner } = {}) => {
  * @return {Promise<void>}
  */
 export const writeSnapshot = (name, update, { transactionRunner } = {}) => {
-  const work = () => idb.openDB(name, db =>
-    idb.createStores(db, [
-      ['updates', { autoIncrement: true }],
-      ['custom']
-    ])
-  ).then(db => new Promise((resolve, reject) => {
+  const work = () => openDatabase(name).then(db => new Promise((resolve, reject) => {
     /**
      * @type {IDBTransaction}
      */
@@ -840,12 +844,7 @@ export class IndexeddbPersistence extends Observable {
      */
     this.db = null
     this.synced = false
-    this._db = idb.openDB(name, db =>
-      idb.createStores(db, [
-        ['updates', { autoIncrement: true }],
-        ['custom']
-      ])
-    )
+    this._db = openDatabase(name)
     /**
      * @type {Promise<IndexeddbPersistence>}
      */
